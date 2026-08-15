@@ -1,11 +1,11 @@
 # Thermal Sentinel
 
 > **The robot doesn't follow a route. It follows risk.**
+> live project at: https://thermal-sentinel.onrender.com/
 
 A simulation engine, digital twin for a robot patrol system. The goal is to simulate an inspection process and compute how quickly a real fault is confirmed.comparing two patrol strategies:
 
-fixed: keeps a steady route
-adaptive: interrupts patrol when heat/rise signals suggest a problem
+
 
 ```bash
 python run.py
