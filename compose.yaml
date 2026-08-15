@@ -1,0 +1,15 @@
+services:
+  thermal-sentinel:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      SENTINEL_SEED: "2026"
+      SENTINEL_TICK_SECONDS: "0.65"
+      SENTINEL_DB_PATH: "/app/data/thermal-sentinel.db"
+    volumes:
+      - sentinel-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  sentinel-data:
