@@ -1,77 +1,50 @@
-import contextlib
-import io
-import json
-import unittest
+from __future__ import annotations
 
-from thermal_sentinel.benchmark import (
-    DEFAULT_FAULT_BAYS,
-    DEFAULT_SEEDS,
-    main,
-    run_benchmark,
-)
+import pytest
+
+from thermal_sentinel.benchmark import bootstrap_ci, describe, run_benchmark
 
 
-class BenchmarkTests(unittest.TestCase):
-    def test_full_report_is_deterministic_and_json_serializable(self):
-        first = run_benchmark()
-        second = run_benchmark()
-
-        self.assertEqual(first, second)
-        self.assertEqual(json.loads(json.dumps(first)), first)
-
-    def test_report_has_24_case_matrix_and_aggregate_evidence(self):
-        report = run_benchmark()
-        benchmark = report["benchmark"]
-        summary = report["summary"]
-        scenarios = report["scenarios"]
-
-        self.assertEqual(benchmark["scenario_count"], 24)
-        self.assertEqual(len(DEFAULT_SEEDS) * len(DEFAULT_FAULT_BAYS), 24)
-        self.assertEqual(len(scenarios), 24)
-        self.assertEqual(
-            {(case["seed"], case["fault_bay_id"]) for case in scenarios},
-            {(seed, bay) for seed in DEFAULT_SEEDS for bay in DEFAULT_FAULT_BAYS},
-        )
-
-        self.assertIn("median", summary["time_saved_s"])
-        self.assertIn("p95", summary["time_saved_s"])
-        self.assertGreater(summary["time_saved_s"]["count"], 0)
-        self.assertEqual(
-            summary["adaptive_wins"]["evaluated_count"],
-            24 - summary["outcomes"]["neither_confirmed"],
-        )
-        self.assertEqual(summary["coverage_pct"]["fixed"]["count"], 24)
-        self.assertEqual(summary["coverage_pct"]["adaptive"]["count"], 24)
-        self.assertEqual(summary["distance_m"]["fixed"]["count"], 24)
-        self.assertEqual(summary["distance_m"]["adaptive"]["count"], 24)
-
-        for case in scenarios:
-            self.assertEqual(
-                set(case),
-                {
-                    "case_id",
-                    "seed",
-                    "fault_bay_id",
-                    "outcome",
-                    "time_saved_s",
-                    "distance_delta_m",
-                    "fixed",
-                    "adaptive",
-                },
-            )
-            self.assertIn("coverage_pct", case["fixed"])
-            self.assertIn("coverage_pct", case["adaptive"])
-
-    def test_cli_emits_parseable_json(self):
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            exit_code = main(["--compact"])
-
-        payload = json.loads(output.getvalue())
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(payload["benchmark"]["scenario_count"], 24)
-        self.assertEqual(len(output.getvalue().splitlines()), 1)
+@pytest.fixture(scope="module")
+def report() -> dict[str, object]:
+    return run_benchmark(range(1, 11)).data
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_describe_empty_and_basic() -> None:
+    assert describe([])["n"] == 0
+    stats = describe([3.0, 1.0, 2.0])
+    assert stats == {"n": 3, "mean": 2.0, "median": 2.0, "p90": 3.0, "min": 1.0, "max": 3.0}
+
+
+def test_bootstrap_ci_is_reproducible_and_brackets_mean() -> None:
+    values = [float(v) for v in range(20)]
+    ci = bootstrap_ci(values)
+    assert ci == bootstrap_ci(values)
+    assert ci is not None
+    assert ci[0] < 9.5 < ci[1]
+    assert bootstrap_ci([1.0]) is None
+
+
+def test_case_counts(report: dict[str, object]) -> None:
+    summary = report["summary"]
+    assert isinstance(summary, dict)
+    assert summary["cases"] == 70
+    assert summary["fault_cases"] == 60
+    assert summary["no_fault_cases"] == 10
+    assert sum(summary["paired"]["outcomes"].values()) == 60
+
+
+def test_adaptive_beats_fixed_on_median_latency(report: dict[str, object]) -> None:
+    summary = report["summary"]
+    assert isinstance(summary, dict)
+    assert summary["adaptive"]["time_to_confirm_s"]["median"] < summary["fixed"]["time_to_confirm_s"]["median"]
+
+
+def test_benchmark_is_deterministic(report: dict[str, object]) -> None:
+    assert run_benchmark(range(1, 11)).data == report
+
+
+def test_no_fault_cases_have_no_outcome_entry(report: dict[str, object]) -> None:
+    cases = report["cases"]
+    assert isinstance(cases, list)
+    assert all(c["outcome"] == "no_fault" for c in cases if c["fault_bay"] is None)

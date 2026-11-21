@@ -1,11 +1,7 @@
-# Security policy
+# Security Policy
 
-Thermal Sentinel is a local research demonstrator, not production control
-software. The HTTP server has no authentication and must not be exposed to an
-untrusted network. Container defaults bind the service through the configured
-host port for demonstration only.
+Thermal Sentinel is an offline simulation, benchmark suite, and static web dashboard. It does not execute robot commands, connect to physical hardware, or store user credentials.
 
-Do not use this software to command equipment or make safety decisions. Report
-security issues privately to the repository owner rather than opening a public
-issue with exploit details.
+## Reporting a Vulnerability
 
+If you find a security issue (for example, in the web dashboard or build/CI pipeline), please report it privately via GitHub Security Advisories on this repository rather than opening a public issue.

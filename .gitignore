@@ -1,17 +1,35 @@
+# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
-.pytest_cache/
-.ruff_cache/
-.coverage
-htmlcov/
 .venv/
 venv/
-.env
-.tools/
-data/*.db
-data/*.db-*
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
 dist/
 build/
+
+# Node / Web
+web/node_modules/
+web/dist/
+web/.vite/
+web/coverage/
+*.tsbuildinfo
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# OS / Editors
 .DS_Store
 Thumbs.db
+*.swp
+.vscode/
+.idea/

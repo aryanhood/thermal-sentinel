@@ -1,15 +1,29 @@
 # Contributing
 
-Keep changes tied to the experiment question. A feature should improve the
-policy comparison, reproducibility, evidence quality, or clarity; otherwise it
-is probably outside this repository's intentionally small scope.
+Changes should stay focused on the core question: comparing inspection policies fairly and reproducibly.
 
-Before opening a pull request:
+## Local Setup
 
 ```bash
-PYTHONPATH=src python -m unittest discover -s tests -v
-PYTHONPATH=src python -m compileall -q src tests
+uv sync
+cd web && npm ci
 ```
 
-Include the problem, the reason for the change, and evidence that it preserves
-determinism and paired-policy fairness.
+## Verification Before Opening a PR
+
+```bash
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy
+uv run pytest --cov
+uv run thermal-sentinel export --check
+cd web && npm run check
+```
+
+If you change simulation parameters or policy logic, regenerate the static data and benchmark table:
+
+```bash
+uv run thermal-sentinel export
+```
+
+Include the motivation for the change and verify that determinism and paired-environment fairness are preserved.

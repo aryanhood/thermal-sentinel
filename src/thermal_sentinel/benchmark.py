@@ -1,252 +1,158 @@
-"""Deterministic evidence suite for the Thermal Sentinel decision policy.
-
-The benchmark deliberately keeps the simulator configuration fixed while
-crossing four random seeds with all six possible fault bays.  Both policies
-receive the exact same scenario object, so the reported difference is due to
-the patrol policy rather than different simulated conditions.
-"""
+"""Paired benchmark: every scenario is run under both policies and compared."""
 
 from __future__ import annotations
 
-import argparse
-import json
-import math
-from statistics import fmean, median
-import sys
-from typing import Any, Iterable, Sequence
+import statistics
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from typing import Any
 
-from inspection_core import default_scenario, run_comparison
+from .model import DEFAULT_BAYS, make_scenario, seeded_rng
+from .simulation import PairResult, PolicyConfig, run_pair
 
+__all__ = ["BenchmarkReport", "describe", "run_benchmark"]
 
-DEFAULT_SEEDS: tuple[int, ...] = (11, 23, 37, 53)
-DEFAULT_FAULT_BAYS: tuple[str, ...] = ("B1", "B2", "B3", "B4", "B5", "B6")
-SCHEMA_VERSION = "1.0"
-
-
-def _round(value: float) -> float:
-    return round(value, 2)
+SCHEMA_VERSION = "2.0"
+DEFAULT_SEEDS = 100
+FAULT_CHOICES: tuple[str | None, ...] = (*[bay.id for bay in DEFAULT_BAYS], None)
 
 
-def _percentile(values: Sequence[float], fraction: float) -> float | None:
-    """Return a linearly interpolated percentile without external packages."""
+def describe(values: Sequence[float]) -> dict[str, float | int | None]:
     if not values:
-        return None
+        return {"n": 0, "mean": None, "median": None, "p90": None, "min": None, "max": None}
     ordered = sorted(values)
-    position = (len(ordered) - 1) * fraction
-    lower = math.floor(position)
-    upper = math.ceil(position)
-    if lower == upper:
-        return _round(ordered[lower])
-    weight = position - lower
-    return _round(ordered[lower] + (ordered[upper] - ordered[lower]) * weight)
-
-
-def _stats(values: Iterable[float]) -> dict[str, int | float | None]:
-    samples = list(values)
-    if not samples:
-        return {
-            "count": 0,
-            "min": None,
-            "median": None,
-            "mean": None,
-            "p95": None,
-            "max": None,
-        }
+    p90_index = max(0, min(len(ordered) - 1, round(0.9 * (len(ordered) - 1))))
     return {
-        "count": len(samples),
-        "min": _round(min(samples)),
-        "median": _round(median(samples)),
-        "mean": _round(fmean(samples)),
-        "p95": _percentile(samples, 0.95),
-        "max": _round(max(samples)),
+        "n": len(ordered),
+        "mean": round(statistics.fmean(ordered), 2),
+        "median": round(statistics.median(ordered), 2),
+        "p90": round(ordered[p90_index], 2),
+        "min": round(ordered[0], 2),
+        "max": round(ordered[-1], 2),
     }
 
 
-def _rate(numerator: int, denominator: int) -> float:
-    return 0.0 if denominator == 0 else round(100.0 * numerator / denominator, 1)
+def bootstrap_ci(values: Sequence[float], *, resamples: int = 2000, seed: int = 0) -> tuple[float, float] | None:
+    """Percentile bootstrap 95% confidence interval of the mean (seeded, reproducible)."""
+    if len(values) < 2:
+        return None
+    rng = seeded_rng(seed, "bootstrap")
+    n = len(values)
+    means = sorted(statistics.fmean(rng.choices(values, k=n)) for _ in range(resamples))
+    return round(means[int(0.025 * resamples)], 2), round(means[int(0.975 * resamples) - 1], 2)
 
 
-def _outcome(fixed_time: float | None, adaptive_time: float | None) -> str:
-    if fixed_time is None and adaptive_time is None:
-        return "neither_confirmed"
-    if fixed_time is None:
-        return "adaptive_only_confirmation"
-    if adaptive_time is None:
-        return "fixed_only_confirmation"
-    if adaptive_time < fixed_time:
+def _outcome(pair: PairResult) -> str:
+    f = pair.fixed.metrics["time_to_confirm_s"]
+    a = pair.adaptive.metrics["time_to_confirm_s"]
+    if not pair.scenario.fault_bay_id:
+        return "no_fault"
+    if f is None and a is None:
+        return "neither"
+    if f is None:
+        return "adaptive_only"
+    if a is None:
+        return "fixed_only"
+    if a < f:
         return "adaptive_faster"
-    if fixed_time < adaptive_time:
+    if f < a:
         return "fixed_faster"
     return "tie"
 
 
-def _selected_kpis(kpis: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "time_to_confirm_s": kpis["time_to_confirm_s"],
-        "mission_elapsed_s": kpis["mission_elapsed_s"],
-        "distance_m": kpis["distance_m"],
-        "coverage_pct": kpis["coverage_pct"],
-        "max_unseen_s": kpis["max_unseen_s"],
-        "confirmed_hotspots": kpis["confirmed_hotspots"],
-        "guardrails_respected": kpis["guardrails_respected"],
-    }
+@dataclass(frozen=True, slots=True)
+class BenchmarkReport:
+    data: dict[str, Any]
+
+    @property
+    def summary(self) -> dict[str, Any]:
+        return self.data["summary"]  # type: ignore[no-any-return]
 
 
-def run_benchmark(
-    seeds: Sequence[int] = DEFAULT_SEEDS,
-    fault_bays: Sequence[str] = DEFAULT_FAULT_BAYS,
-) -> dict[str, Any]:
-    """Run the scenario matrix and return a JSON-serializable evidence report."""
-    seeds = tuple(seeds)
-    fault_bays = tuple(fault_bays)
-    if not seeds or not fault_bays:
-        raise ValueError("at least one seed and one fault bay are required")
+def run_benchmark(seeds: Iterable[int] | None = None, config: PolicyConfig | None = None) -> BenchmarkReport:
+    seed_list = list(seeds) if seeds is not None else list(range(1, DEFAULT_SEEDS + 1))
+    pairs = [run_pair(make_scenario(seed, bay), config) for seed in seed_list for bay in FAULT_CHOICES]
 
     cases: list[dict[str, Any]] = []
-    for seed in seeds:
-        for fault_bay_id in fault_bays:
-            scenario = default_scenario(seed, fault_bay_id=fault_bay_id)
-            comparison = run_comparison(scenario)
-            fixed = comparison.fixed.kpis
-            adaptive = comparison.adaptive.kpis
-            fixed_time = fixed["time_to_confirm_s"]
-            adaptive_time = adaptive["time_to_confirm_s"]
-            paired_time_saved = (
-                None
-                if fixed_time is None or adaptive_time is None
-                else _round(fixed_time - adaptive_time)
-            )
-            fixed_distance = float(fixed["distance_m"])
-            adaptive_distance = float(adaptive["distance_m"])
-            cases.append(
-                {
-                    "case_id": f"seed-{seed}-{fault_bay_id}",
-                    "seed": seed,
-                    "fault_bay_id": fault_bay_id,
-                    "outcome": _outcome(fixed_time, adaptive_time),
-                    "time_saved_s": paired_time_saved,
-                    "distance_delta_m": _round(adaptive_distance - fixed_distance),
-                    "fixed": _selected_kpis(fixed),
-                    "adaptive": _selected_kpis(adaptive),
-                }
-            )
-
-    total = len(cases)
-    outcome_counts = {
-        name: sum(case["outcome"] == name for case in cases)
-        for name in (
-            "adaptive_faster",
-            "adaptive_only_confirmation",
-            "fixed_faster",
-            "fixed_only_confirmation",
-            "tie",
-            "neither_confirmed",
+    for pair in pairs:
+        cases.append(
+            {
+                "case_id": pair.scenario.case_id,
+                "seed": pair.scenario.seed,
+                "fault_bay": pair.scenario.fault_bay_id,
+                "fault_onset_s": pair.scenario.fault_onset_s,
+                "outcome": _outcome(pair),
+                "time_saved_s": pair.time_saved_s,
+                "fixed": _compact(pair.fixed.metrics),
+                "adaptive": _compact(pair.adaptive.metrics),
+            }
         )
-    }
-    adaptive_wins = (
-        outcome_counts["adaptive_faster"]
-        + outcome_counts["adaptive_only_confirmation"]
-    )
-    fixed_wins = outcome_counts["fixed_faster"] + outcome_counts["fixed_only_confirmation"]
-    evaluated = total - outcome_counts["neither_confirmed"]
-    both_full_coverage = sum(
-        case["fixed"]["coverage_pct"] == 100.0
-        and case["adaptive"]["coverage_pct"] == 100.0
-        for case in cases
-    )
-    fixed_confirmations = sum(case["fixed"]["confirmed_hotspots"] > 0 for case in cases)
-    adaptive_confirmations = sum(case["adaptive"]["confirmed_hotspots"] > 0 for case in cases)
 
-    reference = default_scenario(seeds[0], fault_bay_id=fault_bays[0])
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "benchmark": {
-            "name": "thermal-sentinel-policy-comparison",
-            "scenario_count": total,
-            "seeds": list(seeds),
-            "fault_bays": list(fault_bays),
-            "policies": ["fixed", "adaptive"],
-            "controlled_parameters": {
-                "fault_onset_s": reference.fault_onset_s,
-                "fault_rise_c_min": reference.fault_rise_c_min,
-                "sensor_noise_c": reference.sensor_noise_c,
-                "robot_speed_m_s": reference.robot_speed_m_s,
-                "max_unseen_s": reference.max_unseen_s,
-            },
-            "method": (
-                "Each policy receives the same seeded scenario. Time saved is "
-                "reported only when both policies confirm the hotspot."
-            ),
+    fault_cases = [c for c in cases if c["fault_bay"]]
+    clean_cases = [c for c in cases if not c["fault_bay"]]
+    hours = len(pairs) * pairs[0].scenario.horizon_s / 3600 if pairs else 0.0
+    saved = [c["time_saved_s"] for c in fault_cases if c["time_saved_s"] is not None]
+
+    def per_policy(policy: str) -> dict[str, Any]:
+        latencies = [c[policy]["time_to_confirm_s"] for c in fault_cases if c[policy]["time_to_confirm_s"] is not None]
+        all_runs = [c[policy] for c in cases]
+        return {
+            "detection_rate_pct": round(100 * len(latencies) / len(fault_cases), 1) if fault_cases else None,
+            "time_to_confirm_s": describe(latencies),
+            "distance_m": describe([r["distance_m"] for r in all_runs]),
+            "false_alarms_per_hour": round(sum(r["false_alarms"] for r in all_runs) / hours, 2) if hours else None,
+            "false_confirmations": sum(r["false_confirmations"] for r in all_runs),
+            "guardrail_ok_pct": round(100 * sum(r["guardrail_ok"] for r in all_runs) / len(all_runs), 1),
+            "max_unseen_s": describe([r["max_unseen_s"] for r in all_runs]),
+        }
+
+    outcomes = dict.fromkeys(
+        ("adaptive_faster", "adaptive_only", "tie", "fixed_faster", "fixed_only", "neither"),
+        0,
+    )
+    for c in fault_cases:
+        outcomes[c["outcome"]] += 1
+    overhead = [
+        100 * (c["adaptive"]["distance_m"] - c["fixed"]["distance_m"]) / c["fixed"]["distance_m"]
+        for c in cases
+        if c["fixed"]["distance_m"]
+    ]
+    ci = bootstrap_ci(saved)
+    summary = {
+        "cases": len(cases),
+        "fault_cases": len(fault_cases),
+        "no_fault_cases": len(clean_cases),
+        "simulated_hours": round(hours, 2),
+        "fixed": per_policy("fixed"),
+        "adaptive": per_policy("adaptive"),
+        "paired": {
+            "outcomes": outcomes,
+            "time_saved_s": describe(saved),
+            "time_saved_ci95_s": list(ci) if ci else None,
+            "distance_overhead_pct": describe(overhead),
         },
-        "summary": {
-            "time_saved_s": _stats(
-                case["time_saved_s"]
-                for case in cases
-                if case["time_saved_s"] is not None
-            ),
-            "adaptive_wins": {
-                "count": adaptive_wins,
-                "evaluated_count": evaluated,
-                "rate_pct": _rate(adaptive_wins, evaluated),
-            },
-            "fixed_wins": {
-                "count": fixed_wins,
-                "evaluated_count": evaluated,
-                "rate_pct": _rate(fixed_wins, evaluated),
-            },
-            "outcomes": outcome_counts,
-            "confirmation_rate_pct": {
-                "fixed": _rate(fixed_confirmations, total),
-                "adaptive": _rate(adaptive_confirmations, total),
-            },
-            "coverage_pct": {
-                "fixed": _stats(float(case["fixed"]["coverage_pct"]) for case in cases),
-                "adaptive": _stats(float(case["adaptive"]["coverage_pct"]) for case in cases),
-                "both_full_count": both_full_coverage,
-                "both_full_rate_pct": _rate(both_full_coverage, total),
-            },
-            "distance_m": {
-                "fixed": _stats(float(case["fixed"]["distance_m"]) for case in cases),
-                "adaptive": _stats(float(case["adaptive"]["distance_m"]) for case in cases),
-                "adaptive_minus_fixed": _stats(
-                    float(case["distance_delta_m"]) for case in cases
-                ),
-            },
-            "guardrails_respected": {
-                "fixed_count": sum(case["fixed"]["guardrails_respected"] for case in cases),
-                "adaptive_count": sum(
-                    case["adaptive"]["guardrails_respected"] for case in cases
-                ),
-                "scenario_count": total,
-            },
-        },
-        "scenarios": cases,
     }
+    method = {
+        "seeds": [seed_list[0], seed_list[-1]] if seed_list else [],
+        "fault_choices": [bay or "none" for bay in FAULT_CHOICES],
+        "fault_onset": "uniform 10-70 s, drawn per seed",
+        "horizon_s": pairs[0].scenario.horizon_s if pairs else None,
+        "pairing": (
+            "both policies share one Environment: identical baselines, line-sensor noise, glitches and camera noise"
+        ),
+    }
+    return BenchmarkReport({"schema_version": SCHEMA_VERSION, "method": method, "summary": summary, "cases": cases})
 
 
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Run the deterministic 24-scenario Thermal Sentinel benchmark."
+def _compact(metrics: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "detected",
+        "time_to_confirm_s",
+        "distance_m",
+        "close_inspections",
+        "false_alarms",
+        "false_confirmations",
+        "max_unseen_s",
+        "guardrail_ok",
     )
-    parser.add_argument(
-        "--compact",
-        action="store_true",
-        help="emit single-line JSON instead of indented JSON",
-    )
-    return parser
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
-    json.dump(
-        run_benchmark(),
-        sys.stdout,
-        indent=None if args.compact else 2,
-        sort_keys=True,
-    )
-    sys.stdout.write("\n")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    return {key: metrics[key] for key in keys}
