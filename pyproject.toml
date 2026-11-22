@@ -1,6 +1,6 @@
 [project]
 name = "thermal-sentinel"
-version = "2.0.0"
+version = "0.1.0"
 description = "Paired, reproducible evaluation of fixed vs. risk-adaptive robot inspection patrols."
 readme = "README.md"
 requires-python = ">=3.11"

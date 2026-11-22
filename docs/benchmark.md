@@ -4,30 +4,50 @@
 
 700 paired scenarios (600 with an injected fault, 100 fault-free controls), 35.0 simulated hours per policy.
 
-| Metric | Fixed patrol | Risk-adaptive |
-|---|---:|---:|
-| Detection rate | 100.0% | 100.0% |
-| Time to confirm, median | 33.0 s | 18.5 s |
-| Time to confirm, p90 | 50.5 s | 22.5 s |
-| Distance per mission, mean | 79.4 m | 82.87 m |
-| False alarms per hour | 0.0 | 6.57 |
-| Worst coverage gap | 49.5 s | 75.5 s |
-| Coverage guardrail met | 100.0% | 100.0% |
+## Five-Policy Comparison (Shared Environments)
 
-## Paired comparison
+| Policy | Detect % | TTC Median | TTC p90 | Mean Saved vs Fixed | Mean Dist | False Alarms/hr | Worst Gap | Guardrail % |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Fixed Patrol | 100.0% | 33.0 s | 50.5 s | 0.0 s | 79.4 m | 0.0 | 49.5 s | 100.0% |
+| Greedy EWMA | 100.0% | 18.5 s | 22.5 s | 14.28 s | 82.84 m | 6.69 | 75.5 s | 100.0% |
+| Risk-Adaptive EWMA | 100.0% | 18.5 s | 22.5 s | 14.3 s | 82.87 m | 6.57 | 75.5 s | 100.0% |
+| Page CUSUM | 100.0% | 22.5 s | 26.0 s | 11.15 s | 82.14 m | 0.57 | 74.0 s | 100.0% |
+| 3-State Bayesian HMM | 100.0% | 16.0 s | 19.5 s | 17.01 s | 82.52 m | 0.09 | 66.5 s | 100.0% |
+
+## Paired comparison (Fixed vs. Risk-Adaptive EWMA)
 
 - Mean time saved: **14.3 s** (95% bootstrap CI 13.35 – 15.27 s)
 - Outcomes on fault cases: adaptive faster 502, tie 77, fixed faster 21, only-adaptive 0, only-fixed 0, neither 0
 - Distance overhead of adaptive: mean 4.39%, p90 8.45%
 
+## 2D Sensitivity Sweep (Glitch Probability x Fault Ramp Rate)
+
+| Glitch Prob | Rise (C/min) | Fixed TTC Med | Greedy EWMA TTC / FA | Adaptive EWMA TTC / FA | CUSUM TTC / FA | Bayesian HMM TTC / FA |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0.0 | 6 | 37.75s | 23.5s / 0.0 | 23.5s / 0.0 | 29.5s / 0.0 | 19.5s / 0.0 |
+| 0.0 | 12 | 32.25s | 18.5s / 0.0 | 18.5s / 0.0 | 22.5s / 0.0 | 15.5s / 0.0 |
+| 0.0 | 24 | 30.75s | 15.25s / 0.0 | 15.25s / 0.0 | 18.5s / 0.0 | 14.5s / 0.0 |
+| 0.0005 | 6 | 37.75s | 24.0s / 2.44 | 24.0s / 2.44 | 29.25s / 0.0 | 19.5s / 0.0 |
+| 0.0005 | 12 | 32.25s | 18.5s / 3.11 | 18.5s / 3.11 | 22.5s / 0.0 | 15.5s / 0.0 |
+| 0.0005 | 24 | 30.75s | 15.5s / 2.44 | 15.5s / 2.44 | 18.5s / 0.0 | 14.5s / 0.0 |
+| 0.002 | 6 | 37.75s | 23.0s / 20.22 | 23.5s / 20.22 | 28.5s / 1.11 | 19.5s / 0.0 |
+| 0.002 | 12 | 32.25s | 19.5s / 20.22 | 19.5s / 19.11 | 22.5s / 1.11 | 15.5s / 0.0 |
+| 0.002 | 24 | 30.75s | 14.5s / 20.22 | 14.75s / 20.44 | 18.5s / 1.11 | 14.5s / 0.0 |
+| 0.005 | 6 | 37.75s | 25.5s / 61.56 | 25.5s / 60.0 | 28.0s / 17.11 | 19.75s / 0.0 |
+| 0.005 | 12 | 32.25s | 20.5s / 60.89 | 20.5s / 56.0 | 22.0s / 17.33 | 15.5s / 0.0 |
+| 0.005 | 24 | 30.75s | 15.75s / 60.22 | 15.5s / 52.89 | 18.5s / 17.56 | 14.5s / 0.0 |
+
 ## What this costs
 
-The adaptive policy trusts line telemetry, so transient sensor glitches send it on detours that
-the fixed patrol never makes. Those appear above as false alarms per hour, extra distance, and a
-larger worst-case coverage gap, which stays inside the guardrail.
+Single-threshold EWMA filters react rapidly to transient glitches, trading extra false-alarm
+detours per hour for speed. At `10x` glitch clutter (`p_glitch = 0.005`), EWMA policies reach
+52-62 false alarms/hr and drop to 85.6-93.3% SLA compliance as active alerts preempt the guardrail.
+Page's CUSUM cuts baseline false alarms by 11.5x (0.57/hr), while the 3-state Bayesian HMM
+separates transient spikes from monotonic ramps (0.09/hr baseline, 100% SLA across the sweep)—
+under the assumption that transient glitch amplitudes resemble its 3.0 C state prior.
 
 ## Method
 
 - Seeds 1–100; fault bay ∈ {B1, B2, B3, B4, B5, B6, none}
 - Fault onset: uniform 10-70 s, drawn per seed; horizon 180.0 s
-- Pairing: both policies share one Environment: identical baselines, line-sensor noise, glitches and camera noise
+- Pairing: all policies share one Environment: identical baselines, line-sensor noise, glitches and camera noise

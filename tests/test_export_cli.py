@@ -15,7 +15,7 @@ from thermal_sentinel.export import BENCHMARK_DOC, DATA_DIR, check_export, expor
 def small_benchmark(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep export tests fast: the real export uses 100 seeds."""
     real = benchmark_module.run_benchmark
-    monkeypatch.setattr(export_module, "run_benchmark", lambda config=None: real(range(1, 4), config))
+    monkeypatch.setattr(export_module, "run_benchmark", lambda config=None: real(range(1, 4), config, sweep_seeds=[1]))
     monkeypatch.setattr(export_module, "DEMO_SEEDS", (1, 2))
 
 

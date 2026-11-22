@@ -53,12 +53,17 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     s = report.summary
     f, a, p = s["fixed"], s["adaptive"], s["paired"]
     print(f"{s['cases']} paired cases ({s['fault_cases']} faulted, {s['no_fault_cases']} clean)")
-    print(
-        f"median time to confirm: fixed {f['time_to_confirm_s']['median']} s, "
-        f"adaptive {a['time_to_confirm_s']['median']} s"
-    )
-    print(f"mean time saved: {p['time_saved_s']['mean']} s, 95% CI {p['time_saved_ci95_s']}")
-    print(f"false alarms / hour: fixed {f['false_alarms_per_hour']}, adaptive {a['false_alarms_per_hour']}")
+    policies = s.get("policies", {"fixed": f, "adaptive": a})
+    for key in ("fixed", "greedy_ewma", "adaptive", "cusum", "bayesian"):
+        if key not in policies:
+            continue
+        pm = policies[key]
+        print(
+            f"  {key:<12} detect={pm['detection_rate_pct']}%  med_ttc={pm['time_to_confirm_s']['median']}s  "
+            f"p90={pm['time_to_confirm_s']['p90']}s  fa/hr={pm['false_alarms_per_hour']}  "
+            f"guard={pm['guardrail_ok_pct']}%"
+        )
+    print(f"mean time saved (adaptive vs fixed): {p['time_saved_s']['mean']} s, 95% CI {p['time_saved_ci95_s']}")
     print(f"distance overhead: {p['distance_overhead_pct']['mean']}% mean")
     return 0
 

@@ -216,6 +216,70 @@ export function BenchmarkView({
         </section>
       </div>
 
+      {/* Five-Policy Ablation Table (when exported) */}
+      {summary.policies && (
+        <section className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
+          <h3 className="text-sm font-semibold text-slate-100">
+            Five-Policy Comparison ({summary.cases} Shared Environments)
+          </h3>
+          <p className="mt-0.5 text-xs text-slate-400">
+            Fixed patrol vs. Greedy EWMA vs. Risk-Adaptive EWMA vs. Page CUSUM vs. 3-State Bayesian HMM.
+          </p>
+          <div className="mt-3 overflow-x-auto">
+            <table className="w-full text-left font-mono text-xs">
+              <thead className="border-b border-slate-800 text-[11px] uppercase text-slate-500">
+                <tr>
+                  <th className="py-2 pr-3">Policy</th>
+                  <th className="py-2 pr-3 text-right">Detect</th>
+                  <th className="py-2 pr-3 text-right">Median TTC</th>
+                  <th className="py-2 pr-3 text-right">p90 TTC</th>
+                  <th className="py-2 pr-3 text-right">Saved vs Fixed</th>
+                  <th className="py-2 pr-3 text-right">False Alarms/hr</th>
+                  <th className="py-2 text-right">Guardrail OK</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/60 tabular-nums">
+                {[
+                  { key: "fixed", label: "Fixed Patrol" },
+                  { key: "greedy_ewma", label: "Greedy EWMA" },
+                  { key: "adaptive", label: "Risk-Adaptive EWMA" },
+                  { key: "cusum", label: "Page CUSUM" },
+                  { key: "bayesian", label: "3-State Bayesian HMM" },
+                ]
+                  .filter((p) => summary.policies?.[p.key])
+                  .map(({ key, label }) => {
+                    const pm = summary.policies?.[key];
+                    if (!pm) return null;
+                    return (
+                      <tr key={key} className="hover:bg-slate-800/30">
+                        <td className="py-2 pr-3 font-sans font-medium text-slate-200">{label}</td>
+                        <td className="py-2 pr-3 text-right text-slate-300">
+                          {pm.detection_rate_pct ?? "—"}%
+                        </td>
+                        <td className="py-2 pr-3 text-right text-emerald-300">
+                          {pm.time_to_confirm_s.median ?? "—"}s
+                        </td>
+                        <td className="py-2 pr-3 text-right text-slate-300">
+                          {pm.time_to_confirm_s.p90 ?? "—"}s
+                        </td>
+                        <td className="py-2 pr-3 text-right text-sky-300">
+                          {pm.mean_time_saved_vs_fixed_s != null
+                            ? `${pm.mean_time_saved_vs_fixed_s > 0 ? "+" : ""}${pm.mean_time_saved_vs_fixed_s}s`
+                            : "—"}
+                        </td>
+                        <td className="py-2 pr-3 text-right text-amber-300">
+                          {pm.false_alarms_per_hour ?? "—"}
+                        </td>
+                        <td className="py-2 text-right text-slate-300">{pm.guardrail_ok_pct}%</td>
+                      </tr>
+                    );
+                  })}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
       {/* Case Explorer Table */}
       <section className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">

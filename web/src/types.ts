@@ -33,6 +33,10 @@ export interface PolicyConfig {
   weight_travel: number;
   thermal_scale_c: number;
   travel_scale_m: number;
+  cusum_drift_c?: number;
+  cusum_threshold_c?: number;
+  bayes_alert_prob?: number;
+  bayes_clear_prob?: number;
 }
 
 export interface RunMetrics {
@@ -124,6 +128,8 @@ export interface PolicyBenchmarkSummary {
   false_confirmations: number;
   guardrail_ok_pct: number;
   max_unseen_s: DistributionStats;
+  mean_time_saved_vs_fixed_s?: number | null;
+  time_saved_ci95_s?: [number, number] | null;
 }
 
 export interface BenchmarkCase {
@@ -162,6 +168,25 @@ export interface BenchmarkCase {
   };
 }
 
+export interface SensitivityCellPolicyMetrics {
+  detection_rate_pct: number | null;
+  ttc_median_s: number | null;
+  ttc_mean_s: number | null;
+  ttc_p90_s: number | null;
+  false_alarms_per_hour: number | null;
+  false_confirmations: number;
+  distance_mean_m: number | null;
+  guardrail_ok_pct: number;
+}
+
+export interface SensitivityCell {
+  line_glitch_prob: number;
+  fault_rise_c_per_min: number;
+  fault_cases: number;
+  simulated_hours: number;
+  policies: Record<string, SensitivityCellPolicyMetrics>;
+}
+
 export interface BenchmarkReport {
   schema_version: string;
   method: {
@@ -178,6 +203,7 @@ export interface BenchmarkReport {
     simulated_hours: number;
     fixed: PolicyBenchmarkSummary;
     adaptive: PolicyBenchmarkSummary;
+    policies?: Record<string, PolicyBenchmarkSummary>;
     paired: {
       outcomes: Record<string, number>;
       time_saved_s: DistributionStats;
@@ -185,5 +211,6 @@ export interface BenchmarkReport {
       distance_overhead_pct: DistributionStats;
     };
   };
+  sensitivity_sweep?: SensitivityCell[];
   cases: BenchmarkCase[];
 }

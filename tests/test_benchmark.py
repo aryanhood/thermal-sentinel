@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from thermal_sentinel.benchmark import bootstrap_ci, describe, run_benchmark
+from thermal_sentinel.benchmark import bootstrap_ci, describe, run_benchmark, run_sensitivity_sweep
 
 
 @pytest.fixture(scope="module")
 def report() -> dict[str, object]:
-    return run_benchmark(range(1, 11)).data
+    return run_benchmark(range(1, 11), sweep_seeds=range(1, 3)).data
 
 
 def test_describe_empty_and_basic() -> None:
@@ -41,7 +41,18 @@ def test_adaptive_beats_fixed_on_median_latency(report: dict[str, object]) -> No
 
 
 def test_benchmark_is_deterministic(report: dict[str, object]) -> None:
-    assert run_benchmark(range(1, 11)).data == report
+    assert run_benchmark(range(1, 11), sweep_seeds=range(1, 3)).data == report
+
+
+def test_five_policies_and_sensitivity_sweep_present(report: dict[str, object]) -> None:
+    summary = report["summary"]
+    assert isinstance(summary, dict)
+    policies = summary["policies"]
+    assert set(policies) == {"fixed", "greedy_ewma", "adaptive", "cusum", "bayesian"}
+    assert policies["bayesian"]["false_alarms_per_hour"] <= policies["adaptive"]["false_alarms_per_hour"]
+    rows = run_sensitivity_sweep(seeds=range(1, 3))
+    assert len(rows) == 12
+    assert set(rows[0]["policies"]) == {"fixed", "greedy_ewma", "adaptive", "cusum", "bayesian"}
 
 
 def test_no_fault_cases_have_no_outcome_entry(report: dict[str, object]) -> None:

@@ -18,6 +18,6 @@ combined with explicit hysteresis (`alert_on_c` / `alert_off_c`) and a hard cove
 
 ## Consequences
 
-- Operators and interviewers can inspect why every retarget occurred.
+- Operators and engineers can inspect why every retarget occurred.
 - Trade-offs (e.g., false-alarm detours vs. confirmation speed) are tunable via `PolicyConfig` without retraining.
 - Provides a strong, reproducible baseline if learned policies are ever evaluated against real plant data.

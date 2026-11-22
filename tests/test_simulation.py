@@ -72,6 +72,36 @@ def test_confirmed_bay_is_marked_in_frames() -> None:
     assert frames["status"][-1][4] == int(BayStatus.CONFIRMED)
 
 
+@pytest.mark.parametrize("policy", [Policy.GREEDY_EWMA, Policy.CUSUM, Policy.BAYESIAN])
+def test_extended_policies_detect_fault_with_zero_false_confirmations(policy: Policy) -> None:
+    env = Environment(make_scenario(3, "B5"))
+    res = run_policy(env.scenario, policy, env=env)
+    assert res.metrics["detected"]
+    assert res.metrics["false_confirmations"] == 0
+    assert res.metrics["time_to_confirm_s"] is not None
+    assert any(d["mode"] == "alert" for d in res.decisions)
+
+
+def test_cusum_and_bayesian_reject_isolated_glitches() -> None:
+    ewma_fa = 0
+    cusum_fa = 0
+    bayes_fa = 0
+    for seed in range(1, 11):
+        scenario = Scenario(seed=seed, fault_bay_id=None, line_glitch_prob=0.002)
+        env = Environment(scenario)
+        ewma_res = run_policy(scenario, Policy.ADAPTIVE, env=env)
+        cusum_res = run_policy(scenario, Policy.CUSUM, env=env)
+        bayes_res = run_policy(scenario, Policy.BAYESIAN, env=env)
+        ewma_fa += int(ewma_res.metrics["false_alarms"])
+        cusum_fa += int(cusum_res.metrics["false_alarms"])
+        bayes_fa += int(bayes_res.metrics["false_alarms"])
+        assert cusum_res.metrics["false_confirmations"] == 0
+        assert bayes_res.metrics["false_confirmations"] == 0
+    assert ewma_fa > 0
+    assert cusum_fa < ewma_fa
+    assert bayes_fa < ewma_fa
+
+
 def test_glitch_only_world_produces_false_alarm_but_never_false_confirmation() -> None:
     scenario = Scenario(seed=11, fault_bay_id=None, line_glitch_prob=0.02)
     result = run_policy(scenario, "adaptive")

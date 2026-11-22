@@ -4,7 +4,7 @@ import App from "./App";
 import type { BenchmarkReport, CatalogIndex, ScenarioDocument } from "./types";
 
 const MOCK_CATALOG: CatalogIndex = {
-  version: "2.0.0",
+  version: "0.1.0",
   scenarios: [
     { case_id: "seed-3-b5", seed: 3, fault_bay: "B5", fault_onset_s: 34.5, time_saved_s: 34.0 },
     { case_id: "seed-3-none", seed: 3, fault_bay: null, fault_onset_s: 34.5, time_saved_s: null },
