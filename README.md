@@ -1,10 +1,14 @@
-# Thermal Sentinel — Sequential Change-Point Detection & Risk-Adaptive Dispatch
+# Thermal Sentinel — Smart Robot Patrol Under Noisy Sensors
 
-**A reproducible discrete-event benchmark evaluating fixed patrols against EWMA, Page CUSUM, and 3-state Bayesian HMM sequential anomaly detectors under shared stochastic environments.**
+### Overview (What & Why)
+
+- **The Problem:** Imagine an inspection robot patrolling 6 industrial bays watched by cheap temperature sensors. The sensors occasionally throw random 3-second glitch spikes. If the robot chases every spike, it wastes all its time on false alarms; if it ignores the sensors and walks a fixed loop, real overheating faults take too long to confirm.
+- **What I Built:** A discrete-event simulation benchmark that tests 5 different robot dispatch strategies—from a fixed patrol loop to EWMA thresholds, Page's CUSUM, and a 3-state Bayesian Hidden Markov Model—under the exact same pre-computed noise and fault environments.
+- **Key Result:** Across 700 paired scenarios, the 3-state Bayesian filter distinguishes brief sensor glitches from real thermal ramps, cutting false-alarm trips by **73×** (`0.09/hr` vs. `6.57/hr` for EWMA) and confirming real faults **17 seconds faster** than a fixed patrol.
 
 ---
 
-## 1. Research Question
+## 1. How the Shared-Environment Benchmark Works
 
 In an automated six-bay test cell, fixed thermocouples stream noisy temperature deltas while transient sensor glitches inject `3.0 s` false-alarm spikes. When a thermocouple signals an anomaly, should a mobile inspection robot stay on a deterministic patrol route, dispatch greedily using single-threshold EWMA, integrate residuals with Page's CUSUM, or filter transient spikes with a 3-state Bayesian Hidden Markov Model?
 
