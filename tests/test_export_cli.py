@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+import uvicorn
 
 from thermal_sentinel import benchmark as benchmark_module
 from thermal_sentinel import export as export_module
@@ -83,3 +84,18 @@ def test_cli_benchmark(capsys: pytest.CaptureFixture[str]) -> None:
 def test_cli_rejects_unknown_bay() -> None:
     with pytest.raises(SystemExit):
         main(["run", "--fault", "B9"])
+
+
+def test_cli_serve_invokes_uvicorn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    called: dict[str, object] = {}
+
+    def fake_run(app: object, *, host: str, port: int) -> None:
+        called["app"] = app
+        called["host"] = host
+        called["port"] = port
+
+    monkeypatch.setattr(uvicorn, "run", fake_run)
+    rc = main(["serve", "--host", "127.0.0.1", "--port", "8123", "--db", str(tmp_path / "srv.db"), "--policy", "cusum"])
+    assert rc == 0
+    assert called["host"] == "127.0.0.1"
+    assert called["port"] == 8123

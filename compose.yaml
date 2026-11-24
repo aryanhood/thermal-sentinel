@@ -1,0 +1,13 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      THERMAL_SENTINEL_DB_PATH: /data/thermal_sentinel.db
+      THERMAL_SENTINEL_POLICY: bayesian
+    volumes:
+      - thermal_sentinel_data:/data
+
+volumes:
+  thermal_sentinel_data:

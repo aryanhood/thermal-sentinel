@@ -1,4 +1,4 @@
-.PHONY: setup test lint export web check
+.PHONY: setup test lint export web serve check
 
 setup:
 	uv sync
@@ -19,6 +19,9 @@ export:
 
 web:
 	cd web && npm run dev
+
+serve:
+	uv run thermal-sentinel serve
 
 check: lint test
 	uv run thermal-sentinel export --check

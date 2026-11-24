@@ -1,20 +1,24 @@
 [project]
 name = "thermal-sentinel"
 version = "0.1.0"
-description = "Paired, reproducible evaluation of fixed vs. risk-adaptive robot inspection patrols."
+description = "Industrial thermal monitoring prototype with FastAPI, SQLite, sequential anomaly detection, and a paired inspection simulation."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Aryan Hood" }]
-keywords = ["robotics", "simulation", "digital-twin", "inspection", "benchmark"]
+keywords = ["fastapi", "sqlite", "monitoring", "anomaly-detection", "robotics", "simulation", "inspection"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
     "Typing :: Typed",
     "Topic :: Scientific/Engineering",
 ]
-dependencies = []
+dependencies = [
+    "fastapi>=0.115,<1.0",
+    "pydantic>=2.9,<3.0",
+    "uvicorn>=0.32,<1.0",
+]
 
 [project.urls]
 Repository = "https://github.com/aryanhood/thermal-sentinel"
@@ -24,6 +28,7 @@ thermal-sentinel = "thermal_sentinel.cli:main"
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28",
     "pytest>=8.3",
     "pytest-cov>=6.0",
     "hypothesis>=6.120",

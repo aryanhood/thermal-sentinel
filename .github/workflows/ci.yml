@@ -64,3 +64,49 @@ jobs:
 
       - name: Typecheck, lint, test, and build
         run: npm run check
+
+  docker:
+    name: Docker Build & Smoke Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t thermal-sentinel:ci .
+
+      - name: Start container and verify REST monitoring workflow
+        run: |
+          docker run -d --name thermal-sentinel-ci -p 8000:8000 thermal-sentinel:ci
+          python - << 'EOF'
+          import json
+          import time
+          import urllib.request
+
+          for _ in range(30):
+              try:
+                  with urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=2) as resp:
+                      if resp.status == 200:
+                          break
+              except Exception:
+                  time.sleep(1)
+          else:
+              raise RuntimeError("Server did not become healthy in time")
+
+          req = urllib.request.Request(
+              "http://127.0.0.1:8000/api/v1/readings",
+              data=json.dumps({"bay_id": "B5", "temperature_c": 34.5, "sensor_id": "ci-probe"}).encode(),
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          with urllib.request.urlopen(req, timeout=5) as resp:
+              assert resp.status == 201
+
+          with urllib.request.urlopen("http://127.0.0.1:8000/api/v1/inspection/next", timeout=5) as resp:
+              assert resp.status == 200
+              payload = json.loads(resp.read().decode())
+              assert payload["bay_id"] in {"B1", "B2", "B3", "B4", "B5", "B6"}
+          EOF
+
+      - name: Clean up container
+        if: always()
+        run: docker rm -f thermal-sentinel-ci || true

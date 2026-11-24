@@ -1,24 +1,83 @@
-# Thermal Sentinel — Smart Robot Patrol Under Noisy Sensors
+# Thermal Sentinel
 
-### Overview (What & Why)
+An **industrial thermal monitoring prototype** built with **FastAPI**, **SQLite**, sequential change-point detection, and a paired robot inspection simulation.
 
-- **The Problem:** Imagine an inspection robot patrolling 6 industrial bays watched by cheap temperature sensors. The sensors occasionally throw random 3-second glitch spikes. If the robot chases every spike, it wastes all its time on false alarms; if it ignores the sensors and walks a fixed loop, real overheating faults take too long to confirm.
-- **What I Built:** A discrete-event simulation benchmark that tests 5 different robot dispatch strategies—from a fixed patrol loop to EWMA thresholds, Page's CUSUM, and a 3-state Bayesian Hidden Markov Model—under the exact same pre-computed noise and fault environments.
-- **Key Result:** Across 700 paired scenarios, the 3-state Bayesian filter distinguishes brief sensor glitches from real thermal ramps, cutting false-alarm trips by **73×** (`0.09/hr` vs. `6.57/hr` for EWMA) and confirming real faults **17 seconds faster** than a fixed patrol.
+This system receives timestamped temperature readings over a REST API, stores equipment state and readings in SQLite, detects abnormal heating trends while filtering brief sensor glitches, and recommends which equipment bay an inspection robot should check next.
 
----
-
-## 1. How the Shared-Environment Benchmark Works
-
-In an automated six-bay test cell, fixed thermocouples stream noisy temperature deltas while transient sensor glitches inject `3.0 s` false-alarm spikes. When a thermocouple signals an anomaly, should a mobile inspection robot stay on a deterministic patrol route, dispatch greedily using single-threshold EWMA, integrate residuals with Page's CUSUM, or filter transient spikes with a 3-state Bayesian Hidden Markov Model?
-
-Thermal Sentinel pre-computes every baseline temperature, noise realization, glitch burst, and camera reading per SHA-256 stream (`seeded_rng`) before any policy executes, guaranteeing **identical shared environments** across all five policies.
+> **Important scope note:** This repository is an **industrial monitoring prototype**, not a production-deployed factory system. The backend API, database, anomaly detectors, and decision logic are real working software, while the robot movement and thermocouple scenarios come from a deterministic simulation environment for testing and benchmarking.
 
 ---
 
-## 2. Five-Policy Benchmark (700 Paired Scenarios)
+## 1. What This Prototype Does
 
-Evaluated across `100` SHA-256 seeds `x` `7` fault configurations (`B1..B6` fault ramp at `+12 °C/min`, plus `1` fault-free control), totaling `700` paired scenarios (`35.0` simulated hours per policy). Full report: [`docs/benchmark.md`](docs/benchmark.md).
+- **Sensor Data Ingestion (`FastAPI`):** Accepts single or batch temperature readings via validated REST endpoints (`POST /api/v1/readings` and `POST /api/v1/readings/batch`).
+- **Persistent Storage (`SQLite`):** Stores equipment bay configurations, timestamped sensor readings, alert histories, and inspection verification logs in a thread-safe SQLite database.
+- **Thermal Trend Monitoring:** Tracks every reading through three sequential filters—EWMA, Page's CUSUM, and a 3-state Bayesian Hidden Markov Model (`NOMINAL`, `GLITCH`, `FAULT_RAMP`)—and raises or resolves alerts automatically.
+- **Inspection Prioritization:** Ranks which equipment bay needs attention next (`GET /api/v1/inspection/next`) based on active fault risk, time since last check, and robot travel distance, and records close-range verification outcomes (`POST /api/v1/inspection/verify`).
+- **Simulation Test Environment:** Includes a deterministic 6-bay simulation (`thermal-sentinel benchmark` and `POST /api/v1/simulation/replay`) to evaluate detection speed and false alarms fairly across identical sensor streams.
+
+---
+
+## 2. System Architecture
+
+```mermaid
+flowchart LR
+    S["Sensor Client / Simulation Replay"] -->|POST /api/v1/readings| API["FastAPI REST API"]
+    API --> MON["Monitoring Service (EWMA · CUSUM · Bayesian HMM)"]
+    MON <--> DB[("SQLite Storage (equipment · readings · alerts · logs)")]
+    API --> PLAN["Inspection Planner"]
+    DB <--> PLAN
+    PLAN -->|GET /api/v1/inspection/next| R["Inspection Robot / Operator"]
+    R -->|POST /api/v1/inspection/verify| API
+```
+
+For module details and state transitions, see [docs/architecture.md](docs/architecture.md).
+
+---
+
+## 3. REST API Overview
+
+| Method & Path | Purpose |
+|---|---|
+| `GET /health` | Service status, SQLite connectivity, active policy, and open alert count |
+| `GET /api/v1/equipment` | List all equipment bays and their latest thermal and detector states |
+| `POST /api/v1/equipment` | Register a new equipment bay and its baseline temperature |
+| `PATCH /api/v1/equipment/{bay_id}/baseline` | Update commissioned baseline temperature for a bay |
+| `POST /api/v1/readings` | Ingest one timestamped temperature reading and update alerts |
+| `POST /api/v1/readings/batch` | Validate and ingest a batch of readings in order |
+| `GET /api/v1/readings` | Query stored readings (filter by `bay_id`, `since`, `limit`) |
+| `GET /api/v1/alerts` | List alerts (filter by `status` or `bay_id`) |
+| `POST /api/v1/alerts/{alert_id}/acknowledge` | Acknowledge an open alert |
+| `GET /api/v1/inspection/next` | Recommend the next equipment bay for inspection |
+| `POST /api/v1/inspection/verify` | Record a close-range camera check (`confirmed`, `watch`, `false_alarm`, `nominal`) |
+| `GET /api/v1/inspection/logs` | View robot dispatch and verification logs |
+| `POST /api/v1/simulation/replay` | Stream a simulated scenario into the live monitoring pipeline |
+
+### Example API Workflow
+
+```bash
+# 1. Start the server
+thermal-sentinel serve --host 127.0.0.1 --port 8000
+
+# 2. Replay a simulated fault scenario (seed 3, fault on Bay B5) through the API
+curl -X POST http://127.0.0.1:8000/api/v1/simulation/replay \
+  -H "Content-Type: application/json" \
+  -d '{"seed": 3, "fault_bay_id": "B5", "max_ticks": 140}'
+
+# 3. Ask the planner which bay needs inspection next
+curl "http://127.0.0.1:8000/api/v1/inspection/next"
+
+# 4. Submit a close-range thermal camera check to confirm the fault
+curl -X POST http://127.0.0.1:8000/api/v1/inspection/verify \
+  -H "Content-Type: application/json" \
+  -d '{"bay_id": "B5", "camera_temp_c": 32.0}'
+```
+
+---
+
+## 4. Simulation Benchmark Results
+
+To test how different anomaly detectors behave before using them in the API, the simulation environment evaluates five policies across **700 paired scenarios** (`100` seeds × `7` configurations: faults on `B1..B6` plus fault-free controls, `35.0` simulated hours per policy). Every policy sees the exact same noise and glitch realizations. Full report: [docs/benchmark.md](docs/benchmark.md).
 
 | Policy | Detect % | TTC Median | TTC p90 | Mean Saved vs Fixed | Mean Dist | False Alarms/hr | Worst Gap | Guardrail % |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -28,84 +87,69 @@ Evaluated across `100` SHA-256 seeds `x` `7` fault configurations (`B1..B6` faul
 | Page CUSUM | 100.0% | 22.5 s | 26.0 s | 11.15 s | 82.14 m | 0.57 | 74.0 s | 100.0% |
 | **3-State Bayesian HMM** | **100.0%** | **16.0 s** | **19.5 s** | **17.01 s** | 82.52 m | **0.09** | **66.5 s** | **100.0%** |
 
-- **Paired EWMA vs. Fixed outcomes (`600` fault cases):** Risk-Adaptive EWMA confirms faster in `502` runs (`83.7%`), ties in `77`, and is slower in `21`, with mean time saved `14.3 s` (`95% bootstrap CI: 13.35 – 15.27 s`) and zero false confirmations.
-- **Sequential Filtering Gains:** Integrating raw residuals with Page's one-sided CUSUM cuts false-alarm detours by `11.5x` (`6.57 -> 0.57 / hr`), while the exact 3-state Bayesian HMM (`{NOMINAL, GLITCH, FAULT_RAMP}`) cuts baseline false alarms by `73x` (`0.09 / hr`) and achieves the fastest median confirmation (`16.0 s`).
-
----
-
-## 3. 2D Sensitivity Sweep (`Glitch Rate × Ramp Rate`)
-
 ![Latency vs. False Alarms Pareto Frontier and Ramp-Rate Sensitivity](assets/pareto_sensitivity.png)
 
-Across `12` operating regimes (`line_glitch_prob in {0.0, 0.0005, 0.002, 0.005}` × `fault_rise_c_per_min in {6, 12, 24} °C/min`, `90` fault cases per cell):
-- **Greedy vs. Risk-Adaptive EWMA:** Removing the coverage guardrail and linear risk score (`Greedy EWMA`) yields nearly identical latency (`18.5 s` median) at baseline glitch rates, but under heavy clutter (`p_glitch = 0.005`), **both** EWMA policies experience `52.9–61.6` false alarms/hr and drop to `85.6%–93.3%` coverage SLA compliance as frequent alerts continuously preempt idle guardrail checks.
-- **CUSUM Robustness vs. Slow Ramps:** Page's CUSUM holds false alarms at `0.0–1.11 / hr` up to `4x` nominal glitch density (`p = 0.002`) without knowing glitch amplitude, at the cost of `+4.0–5.5 s` median latency on slow `6 °C/min` faults.
-
 ---
 
-## 4. Policies & Architecture
+## 5. Quick Start
 
-- **`FIXED`:** Clockwise `B1 -> B6` patrol; ignores line telemetry.
-- **`GREEDY_EWMA`:** EWMA hysteresis (`alert_on_c = 1.2 °C`, `alert_off_c = 0.6 °C`); dispatches to nearest alerted bay with no coverage guardrail.
-- **`ADAPTIVE`:** EWMA hysteresis + bounded linear score `0.7·thermal + 0.2·staleness - 0.1·travel` + `80%` staleness guardrail ([ADR-002](docs/adr/0002-explainable-scoring.md)).
-- **`CUSUM`:** Page's one-sided cumulative sum `S_i(t) = max(0, S_i(t-1) + (delta_i(t) - 0.6))` resetting upon negative close inspection.
-- **`BAYESIAN`:** Exact pure-stdlib 3-state HMM forward filter over `{NOMINAL ~ N(0, 0.35), GLITCH ~ N(3.0, 0.35), FAULT_RAMP ~ N(mu_f, 0.65)}` dispatching by expected risk-reduction rate `P(fault) * delta / (travel_time + inspection_time) + 0.15 * staleness`.
-
----
-
-## 5. Limitations & Negative Results
-
-1. **Matched Prior Advantage in the Bayesian HMM:** The 3-state HMM achieves `0.0` false alarms/hr in the sweep partly because its transient glitch state emission prior `N(3.0, 0.35)` matches the simulator's `line_glitch_c = 3.0 °C` transient spike distribution. Under unmodeled sustained calibration offsets or different spike magnitudes, CUSUM degrades more gracefully because it assumes only drift and noise scale.
-2. **Guardrail Preemption Under Heavy Clutter (`p = 0.005`):** The `0.8 * max_unseen_s` staleness guardrail only runs when no bay holds an active alert; under `10x` glitch clutter, continuous EWMA alerts preempt the guardrail, dropping 90 s SLA compliance to `85.6%`. Hard preemption overrides are required if strict SLA guarantees must hold under adversarial noise.
-3. **Synthetic Physical Abstractions:** Robot motion uses obstacle-free Euclidean travel at constant speed `1.0 m/s` and independent bay thermal ramps without cross-bay conductive heat diffusion or battery charging constraints.
-
----
-
-## 6. Quick Start & Verification
-
-### Python CLI (`thermal-sentinel`)
+### Run the FastAPI Monitoring Server Locally
 
 ```bash
-pip install -e .
-
-# Run a single paired scenario
-thermal-sentinel run --seed 3 --fault B5
-
-# Run the full 700-case five-policy benchmark
-thermal-sentinel benchmark
-
-# Regenerate static JSON + docs/benchmark.md (zero drift verified in CI)
-thermal-sentinel export --check
-
-# Regenerate Figure assets/pareto_sensitivity.png
-python scripts/plot_pareto.py
+uv sync
+uv run thermal-sentinel serve --host 127.0.0.1 --port 8000
 ```
 
-### Interactive Web Dashboard (`web/`)
+Interactive OpenAPI docs are available at `http://127.0.0.1:8000/docs`.
+
+### Run with Docker Compose
 
 ```bash
-cd web
-npm install
-npm run check   # tsc --noEmit + biome + vitest + vite build
-npm run dev
+docker compose up --build
+```
+
+The API listens on port `8000` and persists SQLite data in the `thermal_sentinel_data` volume.
+
+### Run the Simulation CLI & Web Replay Dashboard
+
+```bash
+# Run one paired simulation scenario
+uv run thermal-sentinel run --seed 3 --fault B5
+
+# Run the 700-case simulation benchmark
+uv run thermal-sentinel benchmark
+
+# Verify exported dashboard JSON and docs/benchmark.md match simulation code
+uv run thermal-sentinel export --check
+
+# Start the static React replay dashboard
+cd web && npm install && npm run dev
 ```
 
 ### Quality Gates
 
-| Gate | Command | Status / Threshold |
-|---|---|---|
-| Python lint | `ruff check .` | Zero warnings |
-| Strict typing | `mypy` | `strict = true`, zero errors |
-| Tests & Branch Coverage | `pytest --cov` | Unit & Hypothesis tests (`>= 90%` branch coverage) |
-| Export Consistency | `thermal-sentinel export --check` | Zero drift across JSON & Markdown |
-| Web Studio | `npm run check` | `tsc`, `biome`, `vitest`, production `vite build` |
+```bash
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy
+uv run pytest --cov
+cd web && npm run check
+```
+
+---
+
+## 6. Scope and Limitations
+
+- **Prototype Hardware Boundary:** Readings are ingested over HTTP rather than directly from physical plant PLCs, MQTT brokers, or physical mobile robots.
+- **Prior Assumptions in Bayesian Filtering:** The 3-state Bayesian HMM assumes transient glitches resemble a `+3.0 °C` spike distribution. Under sustained offset drift or unmodeled spike magnitudes, Page's CUSUM provides a simpler non-parametric fallback (`THERMAL_SENTINEL_POLICY=cusum`).
+- **Simulation Simplifications:** The test simulation models equipment heating as linear ramps capped at `+15 °C` and robot travel as constant `1.0 m/s` straight-line motion without physical obstacles.
 
 ---
 
 ## Documentation
 
-- [System Architecture & Simulation-to-Reality Gaps](docs/architecture.md)
-- [Generated Five-Policy & Sensitivity Benchmark](docs/benchmark.md)
+- [System Architecture](docs/architecture.md)
+- [Generated Benchmark Report](docs/benchmark.md)
 - [ADR-001: Paired Evaluation on a Shared Environment](docs/adr/0001-paired-shared-environment.md)
 - [ADR-002: Explainable Risk Scoring](docs/adr/0002-explainable-scoring.md)
 - [ADR-003: Deterministic Static Export & Client-Side Replay](docs/adr/0003-static-export-and-client-replay.md)

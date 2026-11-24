@@ -19,6 +19,11 @@ coverage.xml
 dist/
 build/
 
+# SQLite
+*.db
+*.db-wal
+*.db-shm
+
 # Node / Web
 web/node_modules/
 web/dist/

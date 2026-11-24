@@ -1,4 +1,4 @@
-"""Command-line interface: ``thermal-sentinel {run,benchmark,export}``."""
+"""Command-line interface: ``thermal-sentinel {run,benchmark,export,serve}``."""
 
 from __future__ import annotations
 
@@ -8,13 +8,17 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+import uvicorn
+
 from . import __version__
+from .api.app import create_app
 from .benchmark import run_benchmark
 from .export import check_export, export
 from .model import DEFAULT_BAYS, make_scenario
-from .simulation import run_pair
+from .simulation import Policy, run_pair
 
 BAY_CHOICES = [bay.id for bay in DEFAULT_BAYS] + ["none"]
+POLICY_CHOICES = [policy.value for policy in Policy]
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -84,6 +88,12 @@ def _cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_serve(args: argparse.Namespace) -> int:
+    application = create_app(db_path=args.db, policy=args.policy)
+    uvicorn.run(application, host=args.host, port=args.port)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="thermal-sentinel", description=__doc__)
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -105,6 +115,13 @@ def build_parser() -> argparse.ArgumentParser:
     exp.add_argument("--root", default=".", help="repository root (default: current directory)")
     exp.add_argument("--check", action="store_true", help="fail if generated files are stale")
     exp.set_defaults(func=_cmd_export)
+
+    srv = sub.add_parser("serve", help="start the FastAPI monitoring server")
+    srv.add_argument("--host", default="127.0.0.1")
+    srv.add_argument("--port", type=int, default=8000)
+    srv.add_argument("--db", default="thermal_sentinel.db", help="SQLite database path")
+    srv.add_argument("--policy", choices=POLICY_CHOICES, default=Policy.BAYESIAN.value)
+    srv.set_defaults(func=_cmd_serve)
     return parser
 
 
