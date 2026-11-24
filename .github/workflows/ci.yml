@@ -92,19 +92,41 @@ jobs:
           else:
               raise RuntimeError("Server did not become healthy in time")
 
+          payload = json.dumps({
+              "bay_id": "B5",
+              "temperature_c": 34.5,
+              "sensor_id": "thermocouple-B5",
+              "recorded_at": "2026-01-01T00:00:00Z",
+          }).encode()
           req = urllib.request.Request(
               "http://127.0.0.1:8000/api/v1/readings",
-              data=json.dumps({"bay_id": "B5", "temperature_c": 34.5, "sensor_id": "ci-probe"}).encode(),
+              data=payload,
               headers={"Content-Type": "application/json"},
               method="POST",
           )
           with urllib.request.urlopen(req, timeout=5) as resp:
               assert resp.status == 201
 
+          with urllib.request.urlopen(req, timeout=5) as retry_resp:
+              assert retry_resp.status == 200
+              assert json.loads(retry_resp.read().decode())["duplicate"] is True
+
           with urllib.request.urlopen("http://127.0.0.1:8000/api/v1/inspection/next", timeout=5) as resp:
               assert resp.status == 200
-              payload = json.loads(resp.read().decode())
-              assert payload["bay_id"] in {"B1", "B2", "B3", "B4", "B5", "B6"}
+              nxt = json.loads(resp.read().decode())
+              assert nxt["bay_id"] in {"B1", "B2", "B3", "B4", "B5", "B6"}
+
+          replay_req = urllib.request.Request(
+              "http://127.0.0.1:8000/api/v1/simulation/replay",
+              data=json.dumps({"seed": 3, "fault_bay_id": "B5", "max_ticks": 60}).encode(),
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          with urllib.request.urlopen(replay_req, timeout=10) as resp:
+              assert resp.status == 200
+
+          with urllib.request.urlopen("http://127.0.0.1:8000/api/v1/readings?bay_id=B5", timeout=5) as resp:
+              assert len(json.loads(resp.read().decode())) == 1
           EOF
 
       - name: Clean up container

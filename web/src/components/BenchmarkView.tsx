@@ -70,6 +70,11 @@ export function BenchmarkView({
   const ci = paired.time_saved_ci95_s;
   const maxBin = Math.max(1, ...histogram.map((b) => b.count));
 
+  const latencyDomainMax = Math.max(
+    60,
+    fixed.time_to_confirm_s.max ?? 0,
+    adaptive.time_to_confirm_s.max ?? 0,
+  );
   const outcomes = [
     {
       key: "adaptive_faster",
@@ -89,6 +94,36 @@ export function BenchmarkView({
       count: paired.outcomes.fixed_faster ?? 0,
       color: "bg-amber-400",
     },
+    ...(paired.outcomes.adaptive_only
+      ? [
+          {
+            key: "adaptive_only",
+            label: "Adaptive only",
+            count: paired.outcomes.adaptive_only,
+            color: "bg-teal-400",
+          },
+        ]
+      : []),
+    ...(paired.outcomes.fixed_only
+      ? [
+          {
+            key: "fixed_only",
+            label: "Fixed only",
+            count: paired.outcomes.fixed_only,
+            color: "bg-sky-400",
+          },
+        ]
+      : []),
+    ...(paired.outcomes.neither
+      ? [
+          {
+            key: "neither",
+            label: "Neither",
+            count: paired.outcomes.neither,
+            color: "bg-rose-400",
+          },
+        ]
+      : []),
   ];
   const faultTotal = Math.max(1, summary.fault_cases);
 
@@ -105,7 +140,7 @@ export function BenchmarkView({
         <SummaryCard
           label="Median Confirm Latency"
           value={`${adaptive.time_to_confirm_s.median ?? "—"} s`}
-          sub={`Fixed baseline: ${fixed.time_to_confirm_s.median ?? "—"} s (p90: ${adaptive.time_to_confirm_s.p90}s vs ${fixed.time_to_confirm_s.p90}s)`}
+          sub={`Fixed baseline: ${fixed.time_to_confirm_s.median ?? "—"} s (p90: ${adaptive.time_to_confirm_s.p90 ?? "—"}s vs ${fixed.time_to_confirm_s.p90 ?? "—"}s)`}
         />
         <SummaryCard
           label="Distance Overhead"
@@ -135,14 +170,14 @@ export function BenchmarkView({
             <RangeBar
               label="Fixed Patrol"
               stats={fixed.time_to_confirm_s}
-              domainMax={60}
+              domainMax={latencyDomainMax}
               barColor="bg-sky-500/70"
               dotColor="bg-sky-300"
             />
             <RangeBar
               label="Risk-Adaptive"
               stats={adaptive.time_to_confirm_s}
-              domainMax={60}
+              domainMax={latencyDomainMax}
               barColor="bg-emerald-500/70"
               dotColor="bg-emerald-300"
             />

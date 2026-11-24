@@ -71,6 +71,44 @@ class PolicyConfig:
     bayes_alert_prob: float = 0.70
     bayes_clear_prob: float = 0.25
 
+    def __post_init__(self) -> None:
+        numeric = (
+            self.ewma_alpha,
+            self.alert_on_c,
+            self.alert_off_c,
+            self.rearm_after_s,
+            self.watch_c,
+            self.confirm_c,
+            self.guardrail_fraction,
+            self.weight_thermal,
+            self.weight_staleness,
+            self.weight_travel,
+            self.thermal_scale_c,
+            self.travel_scale_m,
+            self.cusum_drift_c,
+            self.cusum_threshold_c,
+            self.bayes_alert_prob,
+            self.bayes_clear_prob,
+        )
+        if not all(math.isfinite(val) for val in numeric):
+            raise ValueError("PolicyConfig parameters must be finite numbers")
+        if not 0.0 < self.ewma_alpha <= 1.0:
+            raise ValueError("ewma_alpha must be in (0, 1]")
+        if self.alert_off_c >= self.alert_on_c:
+            raise ValueError("alert_off_c must be strictly less than alert_on_c")
+        if not 0.0 < self.watch_c <= self.confirm_c:
+            raise ValueError("watch_c must be positive and at most confirm_c")
+        if self.rearm_after_s < 0.0:
+            raise ValueError("rearm_after_s cannot be negative")
+        if not 0.0 < self.guardrail_fraction <= 1.0:
+            raise ValueError("guardrail_fraction must be in (0, 1]")
+        if self.cusum_threshold_c <= 0.0:
+            raise ValueError("cusum_threshold_c must be positive")
+        if not 0.0 <= self.bayes_clear_prob < self.bayes_alert_prob <= 1.0:
+            raise ValueError("bayes probabilities must satisfy 0 <= clear < alert <= 1")
+        if self.thermal_scale_c <= 0.0 or self.travel_scale_m <= 0.0:
+            raise ValueError("scale parameters must be positive")
+
 
 @dataclass(frozen=True, slots=True)
 class RunResult:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..simulation import Policy
 
@@ -30,8 +30,8 @@ __all__ = [
 
 class ReadingCreateRequest(BaseModel):
     bay_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,32}$")
-    temperature_c: float = Field(ge=-50.0, le=500.0)
-    sensor_id: str = Field(default="line-thermocouple", min_length=1, max_length=64)
+    temperature_c: float = Field(ge=-50.0, le=500.0, allow_inf_nan=False)
+    sensor_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.-]{1,64}$")
     recorded_at: datetime | None = None
 
 
@@ -42,31 +42,39 @@ class BatchReadingsRequest(BaseModel):
 class EquipmentCreateRequest(BaseModel):
     bay_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,32}$")
     label: str = Field(min_length=1, max_length=64)
-    x_m: float = Field(ge=-1000.0, le=1000.0)
-    y_m: float = Field(ge=-1000.0, le=1000.0)
-    baseline_temp_c: float = Field(default=28.0, ge=-50.0, le=500.0)
+    sensor_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.-]{1,64}$")
+    x_m: float = Field(ge=-1000.0, le=1000.0, allow_inf_nan=False)
+    y_m: float = Field(ge=-1000.0, le=1000.0, allow_inf_nan=False)
+    baseline_temp_c: float = Field(default=28.0, ge=-50.0, le=500.0, allow_inf_nan=False)
+
+    @field_validator("label")
+    @classmethod
+    def _strip_label(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("label must not be blank")
+        return cleaned
 
 
 class BaselineUpdateRequest(BaseModel):
-    baseline_temp_c: float = Field(ge=-50.0, le=500.0)
+    baseline_temp_c: float = Field(ge=-50.0, le=500.0, allow_inf_nan=False)
 
 
 class InspectionVerifyRequest(BaseModel):
     bay_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,32}$")
-    camera_temp_c: float = Field(ge=-50.0, le=500.0)
-    robot_x_m: float = Field(default=0.0, ge=-1000.0, le=1000.0)
-    robot_y_m: float = Field(default=3.0, ge=-1000.0, le=1000.0)
+    camera_temp_c: float = Field(ge=-50.0, le=500.0, allow_inf_nan=False)
+    robot_x_m: float = Field(default=0.0, ge=-1000.0, le=1000.0, allow_inf_nan=False)
+    robot_y_m: float = Field(default=3.0, ge=-1000.0, le=1000.0, allow_inf_nan=False)
     inspected_at: datetime | None = None
 
 
 class SimulationReplayRequest(BaseModel):
+    """Parameters for an isolated in-memory simulation replay (does not alter stored monitoring data)."""
+
     seed: int = Field(default=3, ge=0, le=2**31 - 1)
     fault_bay_id: str | None = Field(default="B5", pattern=r"^[A-Za-z0-9_-]{1,32}$")
     max_ticks: int = Field(default=120, ge=1, le=360)
-    reset_first: bool = Field(
-        default=False,
-        description="When true, deletes all existing readings, alerts, and inspection logs before replaying.",
-    )
+    policy: Policy | None = None
 
 
 class EquipmentResponse(BaseModel):
@@ -74,6 +82,7 @@ class EquipmentResponse(BaseModel):
 
     bay_id: str
     label: str
+    sensor_id: str
     x_m: float
     y_m: float
     baseline_temp_c: float
@@ -127,6 +136,7 @@ class IngestionResponse(BaseModel):
     alert_event: str | None
     applied_to_detector: bool
     out_of_order: bool
+    duplicate: bool
 
 
 class BatchIngestionResponse(BaseModel):
@@ -134,6 +144,7 @@ class BatchIngestionResponse(BaseModel):
     alerts_opened: int
     alerts_resolved: int
     out_of_order_count: int
+    duplicate_count: int
     results: list[IngestionResponse]
 
 

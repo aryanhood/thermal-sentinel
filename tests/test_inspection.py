@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -7,48 +8,60 @@ import pytest
 from thermal_sentinel.inspection import InspectionPlanner
 from thermal_sentinel.monitoring import MonitoringService
 from thermal_sentinel.simulation import Policy
-from thermal_sentinel.storage import MonitoringStore
+from thermal_sentinel.storage import InvalidTimestampError, MonitoringStore, StaleInspectionError
 
 
-def test_empty_store_raises_on_planning() -> None:
+def test_planner_validation_and_empty_store() -> None:
     with MonitoringStore(":memory:", seed_defaults=False) as store:
+        with pytest.raises(ValueError, match="finite"):
+            InspectionPlanner(store, robot_speed_m_s=math.nan)
+        with pytest.raises(ValueError, match="positive"):
+            InspectionPlanner(store, robot_speed_m_s=0.0)
+        with pytest.raises(ValueError, match="negative"):
+            InspectionPlanner(store, close_inspection_s=-1.0)
+
         planner = InspectionPlanner(store)
         with pytest.raises(ValueError, match="No equipment bays"):
             planner.next_target()
+        with pytest.raises(ValueError, match="No equipment bays"):
+            planner.next_target(log_dispatch=True)
 
 
-def test_priority_policies_and_guardrail() -> None:
+def test_priority_policies_wall_clock_guardrail_and_tie_breaking() -> None:
     t0 = datetime(2026, 1, 1, tzinfo=UTC)
+    now_ref = [t0]
     with MonitoringStore(":memory:") as store:
-        planner = InspectionPlanner(store, policy=Policy.BAYESIAN)
-        service = MonitoringService(store, policy=Policy.ADAPTIVE)
+        planner = InspectionPlanner(store, policy=Policy.BAYESIAN, clock=lambda: now_ref[0])
+        service = MonitoringService(store, policy=Policy.ADAPTIVE, clock=lambda: now_ref[0])
 
-        # Initial patrol picks B1 when none have been inspected
         first = planner.next_target(now=t0, log_dispatch=True)
         assert first.mode == "patrol"
         assert first.bay_id == "B1"
         assert len(store.list_inspection_logs(bay_id="B1")) == 1
 
-        # Routine patrol when all bays were recently inspected (< 72 s ago)
-        for offset_s, bay_id in enumerate(["B4", "B1", "B2", "B3", "B5", "B6"]):
-            planner.verify_inspection(
-                bay_id,
-                28.0,
-                inspected_at=t0 + timedelta(seconds=offset_s * 5),
-            )
+        # Inspect all bays at the same timestamp -> tie-break on guardrail must pick B1 (lowest id)
+        for bay_id in ("B4", "B1", "B2", "B3", "B5", "B6"):
+            planner.verify_inspection(bay_id, 28.0, inspected_at=t0)
+
         patrol = planner.next_target(now=t0 + timedelta(seconds=40), policy=Policy.ADAPTIVE)
         assert patrol.mode == "patrol"
-        assert patrol.bay_id == "B4"
+        assert patrol.bay_id == "B1"
 
-        # Coverage guardrail triggers once B4 goes >= 72 s unseen while no alerts are active
-        guardrail = planner.next_target(now=t0 + timedelta(seconds=80), policy=Policy.ADAPTIVE)
-        assert guardrail.mode == "guardrail"
-        assert guardrail.bay_id == "B4"
+        # Advance wall clock without passing explicit_now or ingesting new readings -> guardrail triggers
+        now_ref[0] = t0 + timedelta(seconds=80)
+        wall_guardrail = planner.next_target(policy=Policy.ADAPTIVE)
+        assert wall_guardrail.mode == "guardrail"
+        assert wall_guardrail.bay_id == "B1"
 
-        # Trigger alerts on B3 (far, low delta) and B5 (closer, hotter)
-        for _ in range(4):
-            service.ingest_reading("B3", 31.0, recorded_at=t0 + timedelta(seconds=112))
-            service.ingest_reading("B5", 34.0, recorded_at=t0 + timedelta(seconds=112))
+        # GREEDY_EWMA ignores guardrail when no alerts are active
+        assert planner.next_target(policy=Policy.GREEDY_EWMA).mode == "patrol"
+
+        # Trigger alerts on B3 (far, low delta) and B5 (closer, hotter) with advancing wall clock
+        for step in range(4):
+            ts_step = t0 + timedelta(seconds=112 + step)
+            now_ref[0] = ts_step
+            service.ingest_reading("B3", 31.0, recorded_at=ts_step)
+            service.ingest_reading("B5", 34.0, recorded_at=ts_step)
 
         adaptive_pick = planner.next_target(robot_x_m=5.0, robot_y_m=5.0, policy=Policy.ADAPTIVE)
         greedy_pick = planner.next_target(robot_x_m=8.0, robot_y_m=1.0, policy=Policy.GREEDY_EWMA)
@@ -66,87 +79,82 @@ def test_priority_policies_and_guardrail() -> None:
         assert fixed_pick.mode == "patrol"
 
 
-def test_verification_outcomes_and_simulation_replay() -> None:
-    t0 = datetime(2026, 1, 1, tzinfo=UTC)
+def test_verification_outcomes_and_stale_inspection_rejection() -> None:
+    t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
     with MonitoringStore(":memory:") as store:
-        service = MonitoringService(store, policy=Policy.BAYESIAN)
-        planner = InspectionPlanner(store, policy=Policy.BAYESIAN)
+        service = MonitoringService(store, policy=Policy.ADAPTIVE, clock=lambda: t0 + timedelta(minutes=5))
+        planner = InspectionPlanner(store, policy=Policy.ADAPTIVE, clock=lambda: t0 + timedelta(minutes=5))
 
-        # Replay known fault scenario (seed=3, fault on B5)
-        summary = planner.replay_scenario(service, seed=3, fault_bay_id="B5", max_ticks=140)
-        assert summary.case_id == "seed-3-b5"
-        assert summary.alerts_opened >= 1
-        assert summary.recommended_bay == "B5"
-        assert summary.recommended_mode == "alert"
+        for step in range(3):
+            service.ingest_reading("B5", 33.0, recorded_at=t0 + timedelta(seconds=20 + step))
+        assert store.get_active_alert("B5") is not None
 
-        # Watch outcome (inconclusive 1.0..1.5 C above B5's seeded baseline)
-        b5_base = store.get_equipment("B5").baseline_temp_c
-        watch_log, watch_eq = planner.verify_inspection("B5", b5_base + 1.2, inspected_at=t0)
+        # Reject verification timestamp older than the active alert's created_at
+        with pytest.raises(StaleInspectionError, match="active alert"):
+            planner.verify_inspection("B5", 28.0, inspected_at=t0 + timedelta(seconds=1))
+
+        # Reject future verification timestamp beyond skew
+        with pytest.raises(InvalidTimestampError, match="skew"):
+            planner.verify_inspection("B5", 32.0, inspected_at=t0 + timedelta(minutes=10))
+
+        # Watch outcome (inconclusive 1.0..1.5 C delta)
+        watch_log, watch_eq = planner.verify_inspection("B5", 29.2, inspected_at=t0 + timedelta(seconds=25))
         assert watch_log.outcome == "watch"
         assert watch_eq.alert_active is True
 
-        # Confirmed outcome (>= 1.5 C above B5's seeded baseline)
-        conf_log, conf_eq = planner.verify_inspection("B5", b5_base + 3.0, inspected_at=t0 + timedelta(seconds=6))
+        # Reject verification older than last_inspected_at
+        with pytest.raises(StaleInspectionError, match="last_inspected_at"):
+            planner.verify_inspection("B5", 28.0, inspected_at=t0 + timedelta(seconds=22))
+
+        # Confirm hotspot (>= 1.5 C delta)
+        conf_log, conf_eq = planner.verify_inspection("B5", 31.0, inspected_at=t0 + timedelta(seconds=30))
         assert conf_log.outcome == "confirmed"
         assert conf_eq.status == "confirmed"
         assert conf_eq.alert_active is False
         assert store.list_alerts(status="confirmed", bay_id="B5")
 
-        # False alarm clearing on an alerted bay (timestamps strictly after replay's +69.5 s)
-        adaptive_svc = MonitoringService(store, policy=Policy.ADAPTIVE)
-        for step in range(4):
-            adaptive_svc.ingest_reading("B1", 32.0, recorded_at=t0 + timedelta(seconds=80 + step))
-        assert store.get_equipment("B1").alert_active is True
-        b1_base = store.get_equipment("B1").baseline_temp_c
-        fa_log, fa_eq = planner.verify_inspection("B1", b1_base + 0.1, inspected_at=t0 + timedelta(seconds=90))
+        # False alarm clearing on an alerted bay (B1)
+        for step in range(3):
+            service.ingest_reading("B1", 32.0, recorded_at=t0 + timedelta(seconds=40 + step))
+        fa_log, fa_eq = planner.verify_inspection("B1", 28.1, inspected_at=t0 + timedelta(seconds=45))
         assert fa_log.outcome == "false_alarm"
         assert fa_eq.alert_active is False
         assert fa_eq.alert_armed is False
         assert fa_eq.rearm_after is not None
 
-        # Routine nominal check on un-alerted bay (and with default inspected_at=None)
-        b2_base = store.get_equipment("B2").baseline_temp_c
-        nom_log, nom_eq = planner.verify_inspection("B2", b2_base)
+        # Routine nominal check using default clock-based timestamp
+        nom_log, nom_eq = planner.verify_inspection("B2", 28.0)
         assert nom_log.outcome == "nominal"
         assert nom_eq.status == "nominal"
 
 
-def test_replay_on_empty_store_without_reset() -> None:
-    with MonitoringStore(":memory:", seed_defaults=False) as store:
-        service = MonitoringService(store, policy=Policy.BAYESIAN)
-        planner = InspectionPlanner(store, policy=Policy.BAYESIAN)
-        summary = planner.replay_scenario(service, seed=1, fault_bay_id=None, max_ticks=10, reset_first=False)
-        assert summary.readings_ingested == 60
-        assert summary.fault_bay_id is None
-        assert len(store.list_equipment()) == 6
-
-
-def test_replay_preserves_existing_data_by_default_and_resets_when_explicit() -> None:
+def test_simulation_replay_is_completely_isolated_from_operational_store() -> None:
     t0 = datetime(2026, 2, 1, 9, 0, 0, tzinfo=UTC)
     with MonitoringStore(":memory:") as store:
-        service = MonitoringService(store, policy=Policy.ADAPTIVE)
-        planner = InspectionPlanner(store, policy=Policy.ADAPTIVE)
+        service = MonitoringService(store, policy=Policy.ADAPTIVE, clock=lambda: t0 + timedelta(minutes=1))
+        planner = InspectionPlanner(store, policy=Policy.ADAPTIVE, clock=lambda: t0 + timedelta(minutes=1))
 
-        # Pre-existing real monitoring history on B1
-        for sec in range(4):
-            service.ingest_reading("B1", 34.0, sensor_id="real-tc-1", recorded_at=t0 + timedelta(seconds=sec))
-        planner.next_target(now=t0 + timedelta(seconds=4), log_dispatch=True)
-        existing_alerts = store.list_alerts(bay_id="B1")
-        assert len(existing_alerts) == 1
-        assert len(store.list_inspection_logs(bay_id="B1")) == 1
+        for sec in range(3):
+            service.ingest_reading("B1", 34.0, recorded_at=t0 + timedelta(seconds=sec))
+        planner.next_target(now=t0 + timedelta(seconds=3), log_dispatch=True)
 
-        # Default replay (reset_first=False) preserves existing readings, alerts, and logs
-        summary = planner.replay_scenario(service, seed=3, fault_bay_id="B5", max_ticks=140)
-        assert summary.readings_ingested == 840
-        assert any(r.sensor_id == "real-tc-1" for r in store.list_readings(bay_id="B1", limit=200))
-        assert len(store.list_alerts(bay_id="B1")) == 1
-        assert len(store.list_inspection_logs(bay_id="B1")) == 1
-        assert len(store.list_alerts(bay_id="B5")) >= 1
-        assert all(not r.out_of_order for r in store.list_readings(limit=1000))
+        eq_before = store.list_equipment()
+        readings_before = store.list_readings(limit=1000)
+        alerts_before = store.list_alerts(limit=1000)
+        logs_before = store.list_inspection_logs(limit=1000)
 
-        # Explicit reset_first=True clears existing history as requested
-        reset_summary = planner.replay_scenario(service, seed=3, fault_bay_id="B5", max_ticks=140, reset_first=True)
-        assert reset_summary.recommended_bay == "B5"
-        assert not any(r.sensor_id == "real-tc-1" for r in store.list_readings(bay_id="B1", limit=200))
-        assert store.list_inspection_logs(bay_id="B1") == []
-        assert store.list_alerts(bay_id="B1") == []
+        summary = planner.replay_scenario(policy=Policy.BAYESIAN, seed=3, fault_bay_id="B5", max_ticks=140)
+        assert summary.case_id == "seed-3-b5"
+        assert summary.alerts_opened >= 1
+        assert summary.recommended_bay == "B5"
+        assert summary.recommended_mode == "alert"
+
+        # Operational store must remain 100% untouched
+        assert store.list_equipment() == eq_before
+        assert store.list_readings(limit=1000) == readings_before
+        assert store.list_alerts(limit=1000) == alerts_before
+        assert store.list_inspection_logs(limit=1000) == logs_before
+
+        clean_summary = planner.replay_scenario(service, seed=1, fault_bay_id=None, max_ticks=10)
+        assert clean_summary.readings_ingested == 60
+        assert clean_summary.fault_bay_id is None

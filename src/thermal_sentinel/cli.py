@@ -89,6 +89,9 @@ def _cmd_export(args: argparse.Namespace) -> int:
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
+    if not 1 <= args.port <= 65535:
+        print("--port must be between 1 and 65535", file=sys.stderr)
+        return 2
     application = create_app(db_path=args.db, policy=args.policy)
     uvicorn.run(application, host=args.host, port=args.port)
     return 0

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Response, status
 
 from ...monitoring import IngestionResult, MonitoringService, ReadingInput
 from ...storage import MonitoringStore
@@ -31,11 +31,13 @@ def _to_ingestion_response(result: IngestionResult) -> IngestionResponse:
         alert_event=result.alert_event,
         applied_to_detector=result.applied_to_detector,
         out_of_order=result.out_of_order,
+        duplicate=result.duplicate,
     )
 
 
 @router.post("", response_model=IngestionResponse, status_code=status.HTTP_201_CREATED)
 def ingest_reading(
+    response: Response,
     payload: ReadingCreateRequest,
     service: Annotated[MonitoringService, Depends(get_service)],
 ) -> IngestionResponse:
@@ -45,6 +47,8 @@ def ingest_reading(
         sensor_id=payload.sensor_id,
         recorded_at=payload.recorded_at,
     )
+    if result.duplicate:
+        response.status_code = status.HTTP_200_OK
     return _to_ingestion_response(result)
 
 
@@ -66,11 +70,13 @@ def ingest_batch(
     opened = sum(1 for item in results if item.alert_event == "opened")
     resolved = sum(1 for item in results if item.alert_event == "resolved")
     out_of_order = sum(1 for item in results if item.out_of_order)
+    duplicate = sum(1 for item in results if item.duplicate)
     return BatchIngestionResponse(
         ingested_count=len(results),
         alerts_opened=opened,
         alerts_resolved=resolved,
         out_of_order_count=out_of_order,
+        duplicate_count=duplicate,
         results=[_to_ingestion_response(item) for item in results],
     )
 

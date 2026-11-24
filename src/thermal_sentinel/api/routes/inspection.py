@@ -76,10 +76,9 @@ def replay_simulation(
     service: Annotated[MonitoringService, Depends(get_service)],
 ) -> ReplayResponse:
     summary = planner.replay_scenario(
-        service,
+        policy=payload.policy or service.policy,
         seed=payload.seed,
         fault_bay_id=payload.fault_bay_id,
         max_ticks=payload.max_ticks,
-        reset_first=payload.reset_first,
     )
     return ReplayResponse.model_validate(summary)

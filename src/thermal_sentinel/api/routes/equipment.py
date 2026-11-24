@@ -37,6 +37,7 @@ def create_equipment(
         x_m=payload.x_m,
         y_m=payload.y_m,
         baseline_temp_c=payload.baseline_temp_c,
+        sensor_id=payload.sensor_id,
     )
     return EquipmentResponse.model_validate(record)
 

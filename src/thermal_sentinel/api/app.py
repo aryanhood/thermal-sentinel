@@ -13,7 +13,17 @@ from .. import __version__
 from ..inspection import InspectionPlanner
 from ..monitoring import MonitoringService
 from ..simulation import Policy, PolicyConfig
-from ..storage import AlertNotFoundError, EquipmentExistsError, EquipmentNotFoundError, MonitoringStore
+from ..storage import (
+    AlertNotFoundError,
+    AlertStateError,
+    ConflictingReadingError,
+    EquipmentExistsError,
+    EquipmentNotFoundError,
+    InvalidTimestampError,
+    MonitoringStore,
+    SensorMismatchError,
+    StaleInspectionError,
+)
 from .deps import AppSettings
 from .routes import alerts, equipment, health, inspection, readings
 
@@ -57,8 +67,16 @@ def create_app(
         return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content={"detail": str(exc)})
 
     @application.exception_handler(EquipmentExistsError)
+    @application.exception_handler(SensorMismatchError)
+    @application.exception_handler(ConflictingReadingError)
+    @application.exception_handler(AlertStateError)
+    @application.exception_handler(StaleInspectionError)
     def handle_conflict(_request: Request, exc: Exception) -> JSONResponse:
         return JSONResponse(status_code=status.HTTP_409_CONFLICT, content={"detail": str(exc)})
+
+    @application.exception_handler(InvalidTimestampError)
+    def handle_invalid_timestamp(_request: Request, exc: Exception) -> JSONResponse:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
 
     @application.exception_handler(ValueError)
     def handle_value_error(_request: Request, exc: Exception) -> JSONResponse:

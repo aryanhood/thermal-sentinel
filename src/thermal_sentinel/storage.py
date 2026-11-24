@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
 import threading
 from collections.abc import Iterator
@@ -17,12 +18,17 @@ from .model import DEFAULT_BAYS
 __all__ = [
     "AlertNotFoundError",
     "AlertRecord",
+    "AlertStateError",
+    "ConflictingReadingError",
     "EquipmentExistsError",
     "EquipmentNotFoundError",
     "EquipmentRecord",
     "InspectionLogRecord",
+    "InvalidTimestampError",
     "MonitoringStore",
+    "SensorMismatchError",
     "SensorReadingRecord",
+    "StaleInspectionError",
 ]
 
 _DEFAULT_BAYES_NOM = 0.995
@@ -34,10 +40,11 @@ _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS equipment (
     bay_id TEXT PRIMARY KEY,
     label TEXT NOT NULL,
+    sensor_id TEXT NOT NULL UNIQUE,
     x_m REAL NOT NULL,
     y_m REAL NOT NULL,
     baseline_temp_c REAL NOT NULL,
-    status TEXT NOT NULL DEFAULT 'nominal',
+    status TEXT NOT NULL DEFAULT 'nominal' CHECK (status IN ('nominal', 'alert', 'confirmed')),
     latest_temp_c REAL,
     latest_delta_c REAL,
     ewma_delta_c REAL NOT NULL DEFAULT 0.0,
@@ -46,8 +53,8 @@ CREATE TABLE IF NOT EXISTS equipment (
     bayes_p_glitch REAL NOT NULL DEFAULT 0.004,
     bayes_p_fault REAL NOT NULL DEFAULT 0.001,
     bayes_mu_fault REAL NOT NULL DEFAULT 1.2,
-    alert_active INTEGER NOT NULL DEFAULT 0,
-    alert_armed INTEGER NOT NULL DEFAULT 1,
+    alert_active INTEGER NOT NULL DEFAULT 0 CHECK (alert_active IN (0, 1)),
+    alert_armed INTEGER NOT NULL DEFAULT 1 CHECK (alert_armed IN (0, 1)),
     rearm_after TEXT,
     last_reading_at TEXT,
     last_inspected_at TEXT
@@ -61,7 +68,8 @@ CREATE TABLE IF NOT EXISTS sensor_readings (
     delta_c REAL NOT NULL,
     recorded_at TEXT NOT NULL,
     ingested_at TEXT NOT NULL,
-    out_of_order INTEGER NOT NULL DEFAULT 0
+    out_of_order INTEGER NOT NULL DEFAULT 0 CHECK (out_of_order IN (0, 1)),
+    UNIQUE (bay_id, recorded_at)
 );
 
 CREATE INDEX IF NOT EXISTS idx_readings_bay_time
@@ -72,7 +80,7 @@ CREATE TABLE IF NOT EXISTS alerts (
     bay_id TEXT NOT NULL REFERENCES equipment(bay_id) ON DELETE CASCADE,
     detector TEXT NOT NULL,
     severity TEXT NOT NULL,
-    status TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('open', 'acknowledged', 'confirmed', 'resolved')),
     message TEXT NOT NULL,
     metric_value REAL NOT NULL,
     created_at TEXT NOT NULL,
@@ -81,6 +89,10 @@ CREATE TABLE IF NOT EXISTS alerts (
 
 CREATE INDEX IF NOT EXISTS idx_alerts_status_bay
 ON alerts (status, bay_id, id DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_one_active_per_bay
+ON alerts (bay_id)
+WHERE status IN ('open', 'acknowledged');
 
 CREATE TABLE IF NOT EXISTS inspection_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,7 +104,7 @@ CREATE TABLE IF NOT EXISTS inspection_logs (
     robot_x_m REAL NOT NULL,
     robot_y_m REAL NOT NULL,
     camera_temp_c REAL,
-    outcome TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('dispatched', 'confirmed', 'watch', 'false_alarm', 'nominal')),
     created_at TEXT NOT NULL
 );
 
@@ -113,7 +125,7 @@ class EquipmentNotFoundError(KeyError):
 
 
 class EquipmentExistsError(ValueError):
-    """Raised when attempting to register a duplicate equipment bay."""
+    """Raised when attempting to register a duplicate equipment bay or sensor binding."""
 
 
 class AlertNotFoundError(KeyError):
@@ -127,10 +139,31 @@ class AlertNotFoundError(KeyError):
         return str(self.args[0])
 
 
+class SensorMismatchError(ValueError):
+    """Raised when a reading's sensor_id does not match the bay's bound sensor."""
+
+
+class ConflictingReadingError(ValueError):
+    """Raised when a repeated timestamp carries a different temperature measurement."""
+
+
+class AlertStateError(ValueError):
+    """Raised when attempting an invalid alert lifecycle transition."""
+
+
+class InvalidTimestampError(ValueError):
+    """Raised when an observation timestamp exceeds allowed future clock skew."""
+
+
+class StaleInspectionError(ValueError):
+    """Raised when an inspection verification timestamp is older than existing state."""
+
+
 @dataclass(frozen=True, slots=True)
 class EquipmentRecord:
     bay_id: str
     label: str
+    sensor_id: str
     x_m: float
     y_m: float
     baseline_temp_c: float
@@ -190,6 +223,12 @@ class InspectionLogRecord:
     created_at: datetime
 
 
+def _require_finite(name: str, value: float) -> float:
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be a finite number")
+    return value
+
+
 def _to_utc(value: datetime | None = None) -> datetime:
     if value is None:
         return datetime.now(UTC)
@@ -214,6 +253,7 @@ def _row_to_equipment(row: sqlite3.Row) -> EquipmentRecord:
     return EquipmentRecord(
         bay_id=str(row["bay_id"]),
         label=str(row["label"]),
+        sensor_id=str(row["sensor_id"]),
         x_m=float(row["x_m"]),
         y_m=float(row["y_m"]),
         baseline_temp_c=float(row["baseline_temp_c"]),
@@ -278,7 +318,7 @@ def _row_to_log(row: sqlite3.Row) -> InspectionLogRecord:
 
 
 class MonitoringStore:
-    """Thread-safe SQLite store for thermal monitoring state and audit logs."""
+    """SQLite store for thermal monitoring state and audit logs with immediate write transactions."""
 
     def __init__(
         self,
@@ -287,19 +327,21 @@ class MonitoringStore:
         seed_defaults: bool = True,
         default_baseline_c: float = 28.0,
     ) -> None:
+        _require_finite("default_baseline_c", default_baseline_c)
         target = str(db_path)
         self.db_path = target
         if target != ":memory:" and not target.startswith("file:"):
             Path(target).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._tx_depth = 0
-        self._conn = sqlite3.connect(target, check_same_thread=False, isolation_level=None)
+        self._conn = sqlite3.connect(target, timeout=10.0, check_same_thread=False, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
         with self._lock:
+            self._conn.execute("PRAGMA busy_timeout = 10000;")
             self._conn.execute("PRAGMA foreign_keys = ON;")
             if target != ":memory:":
                 self._conn.execute("PRAGMA journal_mode = WAL;")
-                self._conn.execute("PRAGMA busy_timeout = 5000;")
+                self._conn.execute("PRAGMA synchronous = NORMAL;")
             self._conn.executescript(_SCHEMA_SQL)
         if seed_defaults:
             with self.transaction():
@@ -307,10 +349,13 @@ class MonitoringStore:
                 if count_row is not None and int(count_row["n"]) == 0:
                     self._conn.executemany(
                         """
-                        INSERT INTO equipment (bay_id, label, x_m, y_m, baseline_temp_c)
-                        VALUES (?, ?, ?, ?, ?)
+                        INSERT OR IGNORE INTO equipment (bay_id, label, sensor_id, x_m, y_m, baseline_temp_c)
+                        VALUES (?, ?, ?, ?, ?, ?)
                         """,
-                        [(bay.id, bay.label, bay.x, bay.y, default_baseline_c) for bay in DEFAULT_BAYS],
+                        [
+                            (bay.id, bay.label, f"thermocouple-{bay.id}", bay.x, bay.y, default_baseline_c)
+                            for bay in DEFAULT_BAYS
+                        ],
                     )
 
     @contextmanager
@@ -350,8 +395,20 @@ class MonitoringStore:
 
     def ping(self) -> bool:
         with self._lock:
-            row = self._conn.execute("SELECT 1 AS ok").fetchone()
-            return row is not None and int(row["ok"]) == 1
+            try:
+                row = self._conn.execute("SELECT 1 AS ok").fetchone()
+                return row is not None and int(row["ok"]) == 1
+            except sqlite3.Error:
+                return False
+
+    def count_summary(self) -> tuple[int, int]:
+        """Return ``(equipment_count, open_alert_count)`` using SQL counts."""
+        with self._lock:
+            eq_row = self._conn.execute("SELECT COUNT(*) AS n FROM equipment").fetchone()
+            alert_row = self._conn.execute("SELECT COUNT(*) AS n FROM alerts WHERE status = 'open'").fetchone()
+            assert eq_row is not None
+            assert alert_row is not None
+            return int(eq_row["n"]), int(alert_row["n"])
 
     # -- equipment -----------------------------------------------------------------------
     def list_equipment(self) -> list[EquipmentRecord]:
@@ -373,22 +430,31 @@ class MonitoringStore:
         x_m: float,
         y_m: float,
         baseline_temp_c: float = 28.0,
+        *,
+        sensor_id: str | None = None,
     ) -> EquipmentRecord:
+        _require_finite("x_m", x_m)
+        _require_finite("y_m", y_m)
+        _require_finite("baseline_temp_c", baseline_temp_c)
+        bound_sensor = f"thermocouple-{bay_id}" if sensor_id is None else sensor_id
         with self.transaction():
             try:
                 self._conn.execute(
                     """
-                    INSERT INTO equipment (bay_id, label, x_m, y_m, baseline_temp_c)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO equipment (bay_id, label, sensor_id, x_m, y_m, baseline_temp_c)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (bay_id, label, x_m, y_m, baseline_temp_c),
+                    (bay_id, label, bound_sensor, x_m, y_m, baseline_temp_c),
                 )
             except sqlite3.IntegrityError as exc:
-                raise EquipmentExistsError(f"Equipment bay {bay_id!r} already exists") from exc
+                raise EquipmentExistsError(
+                    f"Equipment bay {bay_id!r} or sensor {bound_sensor!r} already exists"
+                ) from exc
             return self.get_equipment(bay_id)
 
     def update_baseline(self, bay_id: str, baseline_temp_c: float) -> EquipmentRecord:
         """Update a bay's baseline temperature, reset detector state, and resolve active alerts."""
+        _require_finite("baseline_temp_c", baseline_temp_c)
         resolved_ts = _fmt_ts(_to_utc())
         with self.transaction():
             self.get_equipment(bay_id)
@@ -430,6 +496,27 @@ class MonitoringStore:
             return self.get_equipment(bay_id)
 
     # -- readings & alerts ---------------------------------------------------------------
+    def get_reading_by_timestamp(self, bay_id: str, recorded_at: datetime) -> SensorReadingRecord | None:
+        recorded_ts = _fmt_ts(recorded_at)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM sensor_readings WHERE bay_id = ? AND recorded_at = ?",
+                (bay_id, recorded_ts),
+            ).fetchone()
+            return None if row is None else _row_to_reading(row)
+
+    def get_active_alert(self, bay_id: str) -> AlertRecord | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM alerts
+                WHERE bay_id = ? AND status IN ('open', 'acknowledged')
+                ORDER BY id DESC LIMIT 1
+                """,
+                (bay_id,),
+            ).fetchone()
+            return None if row is None else _row_to_alert(row)
+
     def record_late_reading(
         self,
         *,
@@ -621,12 +708,15 @@ class MonitoringStore:
             row = self._conn.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone()
             if row is None:
                 raise AlertNotFoundError(alert_id)
-            if str(row["status"]) == "open":
+            current_status = str(row["status"])
+            if current_status == "open":
                 self._conn.execute("UPDATE alerts SET status = 'acknowledged' WHERE id = ?", (alert_id,))
                 updated = self._conn.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone()
                 assert updated is not None
                 return _row_to_alert(updated)
-            return _row_to_alert(row)
+            if current_status == "acknowledged":
+                return _row_to_alert(row)
+            raise AlertStateError(f"Cannot acknowledge alert {alert_id} with status {current_status!r}")
 
     # -- inspection logs & verification --------------------------------------------------
     def record_inspection_log(
@@ -747,8 +837,18 @@ class MonitoringStore:
             ).fetchall()
             return [_row_to_log(row) for row in rows]
 
-    def reset_monitoring_state(self, *, baseline_overrides: dict[str, float] | None = None) -> None:
+    def reset_monitoring_state(
+        self,
+        *,
+        confirm: bool = False,
+        baseline_overrides: dict[str, float] | None = None,
+    ) -> None:
         """Destructively delete all readings, alerts, and inspection logs and reset equipment state."""
+        if not confirm:
+            raise ValueError("Pass confirm=True to destructively reset monitoring state")
+        if baseline_overrides:
+            for bay_id, baseline_c in baseline_overrides.items():
+                _require_finite(f"baseline[{bay_id}]", baseline_c)
         with self.transaction():
             self._conn.execute("DELETE FROM sensor_readings")
             self._conn.execute("DELETE FROM alerts")

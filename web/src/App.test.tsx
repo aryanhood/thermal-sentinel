@@ -246,4 +246,45 @@ describe("Thermal Sentinel Dashboard", () => {
       expect(screen.getByText("Fixed Patrol (Baseline)")).toBeInTheDocument();
     });
   });
+
+  it("fetches catalog once across scenario changes and supports playback controls", async () => {
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByText("Fixed Patrol (Baseline)")).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByLabelText("Fault bay"), { target: { value: "none" } });
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith("/data/scenarios/seed-3-none.json");
+    });
+
+    const indexCalls = vi
+      .mocked(fetch)
+      .mock.calls.filter(([url]) => typeof url === "string" && url.endsWith("index.json"));
+    expect(indexCalls).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Step forward" }));
+    expect(screen.getByText("t = 0.5 s")).toBeInTheDocument();
+    expect(screen.getByLabelText("Simulation timeline")).toHaveValue("1");
+    fireEvent.click(screen.getByRole("button", { name: "Reset playback" }));
+    expect(screen.queryByText("t = 0.5 s")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Simulation timeline")).toHaveValue("0");
+  });
+
+  it("renders a readable error banner when scenario loading fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        if (url.endsWith("index.json")) {
+          return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(MOCK_CATALOG) });
+        }
+        return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) });
+      }),
+    );
+
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByText(/Failed to load scenario seed-3-b5 \(500\)/)).toBeInTheDocument();
+    });
+  });
 });

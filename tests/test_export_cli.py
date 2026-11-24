@@ -95,6 +95,8 @@ def test_cli_serve_invokes_uvicorn(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         called["port"] = port
 
     monkeypatch.setattr(uvicorn, "run", fake_run)
+    assert main(["serve", "--port", "0"]) == 2
+    assert main(["serve", "--port", "70000"]) == 2
     rc = main(["serve", "--host", "127.0.0.1", "--port", "8123", "--db", str(tmp_path / "srv.db"), "--policy", "cusum"])
     assert rc == 0
     assert called["host"] == "127.0.0.1"

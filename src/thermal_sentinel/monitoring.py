@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from .simulation import Policy, PolicyConfig
-from .storage import AlertRecord, EquipmentRecord, MonitoringStore, SensorReadingRecord
+from .storage import (
+    AlertRecord,
+    ConflictingReadingError,
+    EquipmentRecord,
+    InvalidTimestampError,
+    MonitoringStore,
+    SensorMismatchError,
+    SensorReadingRecord,
+)
 
 __all__ = [
     "IngestionResult",
@@ -26,13 +34,13 @@ class ReadingInput:
 
     bay_id: str
     temperature_c: float
-    sensor_id: str = "line-thermocouple"
+    sensor_id: str | None = None
     recorded_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class IngestionResult:
-    """Result returned after storing one reading and updating anomaly detectors."""
+    """Result returned after processing one sensor reading."""
 
     reading: SensorReadingRecord
     equipment: EquipmentRecord
@@ -40,15 +48,23 @@ class IngestionResult:
     alert_event: str | None
     applied_to_detector: bool = True
     out_of_order: bool = False
+    duplicate: bool = False
+
+
+def _require_finite(*values: float) -> None:
+    if not all(math.isfinite(val) for val in values):
+        raise ValueError("Numeric monitoring inputs must be finite")
 
 
 def update_ewma(prev_ewma: float, delta_c: float, alpha: float) -> float:
     """Update exponentially weighted moving average of temperature delta."""
+    _require_finite(prev_ewma, delta_c, alpha)
     return alpha * delta_c + (1.0 - alpha) * prev_ewma
 
 
 def update_cusum(prev_cusum: float, delta_c: float, drift_c: float) -> float:
     """Update Page's one-sided CUSUM statistic."""
+    _require_finite(prev_cusum, delta_c, drift_c)
     return max(0.0, prev_cusum + (delta_c - drift_c))
 
 
@@ -59,6 +75,7 @@ def update_bayesian_hmm(
 ) -> tuple[tuple[float, float, float], float]:
     """Advance the 3-state Bayesian HMM ({NOMINAL, GLITCH, FAULT_RAMP}) by one step."""
     p_nom, p_gl, p_flt = posterior
+    _require_finite(p_nom, p_gl, p_flt, mu_fault, delta_c)
     pred_nom = (1.0 - 0.002 - 0.0005) * p_nom + (1.0 / 6.0) * p_gl + 0.005 * p_flt
     pred_gl = 0.002 * p_nom + (5.0 / 6.0) * p_gl
     pred_flt = 0.0005 * p_nom + 0.995 * p_flt
@@ -100,28 +117,70 @@ class MonitoringService:
         store: MonitoringStore,
         policy: Policy | str = Policy.BAYESIAN,
         config: PolicyConfig | None = None,
+        *,
+        max_future_skew_s: float = 5.0,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
+        _require_finite(max_future_skew_s)
+        if max_future_skew_s < 0.0:
+            raise ValueError("max_future_skew_s cannot be negative")
         self.store = store
         self.policy = Policy(policy)
         self.cfg = config or PolicyConfig()
+        self.max_future_skew_s = max_future_skew_s
+        self._clock: Callable[[], datetime] = clock if clock is not None else (lambda: datetime.now(UTC))
 
     def ingest_reading(
         self,
         bay_id: str,
         temperature_c: float,
         *,
-        sensor_id: str = "line-thermocouple",
+        sensor_id: str | None = None,
         recorded_at: datetime | None = None,
     ) -> IngestionResult:
         """Process one sensor reading atomically and persist updated equipment and alert state."""
-        ts = _to_utc(recorded_at)
+        _require_finite(temperature_c)
+        now_utc = _to_utc(self._clock())
+
         with self.store.transaction():
             eq = self.store.get_equipment(bay_id)
+            resolved_sensor = eq.sensor_id if sensor_id is None else sensor_id
+            if resolved_sensor != eq.sensor_id:
+                raise SensorMismatchError(
+                    f"Sensor {resolved_sensor!r} is not bound to bay {bay_id!r} (expected {eq.sensor_id!r})"
+                )
+
+            if recorded_at is not None:
+                ts = _to_utc(recorded_at)
+                if ts > now_utc + timedelta(seconds=self.max_future_skew_s):
+                    raise InvalidTimestampError(
+                        f"Reading timestamp {ts.isoformat()} exceeds allowed future clock skew "
+                        f"({self.max_future_skew_s:g}s)"
+                    )
+            else:
+                ts = now_utc
+                if eq.last_reading_at is not None and ts <= eq.last_reading_at:
+                    ts = eq.last_reading_at + timedelta(microseconds=1)
+
             delta_c = temperature_c - eq.baseline_temp_c
+            existing = self.store.get_reading_by_timestamp(bay_id, ts)
+            if existing is not None:
+                if abs(existing.temperature_c - temperature_c) <= 1e-9:
+                    return IngestionResult(
+                        reading=existing,
+                        equipment=eq,
+                        alert=None,
+                        alert_event=None,
+                        applied_to_detector=False,
+                        out_of_order=existing.out_of_order,
+                        duplicate=True,
+                    )
+                raise ConflictingReadingError(f"Conflicting reading for bay {bay_id!r} at {ts.isoformat()}")
+
             if eq.last_reading_at is not None and ts < eq.last_reading_at:
                 reading, unchanged_eq = self.store.record_late_reading(
                     bay_id=bay_id,
-                    sensor_id=sensor_id,
+                    sensor_id=resolved_sensor,
                     temperature_c=temperature_c,
                     delta_c=delta_c,
                     recorded_at=ts,
@@ -133,6 +192,7 @@ class MonitoringService:
                     alert_event=None,
                     applied_to_detector=False,
                     out_of_order=True,
+                    duplicate=False,
                 )
 
             new_ewma = update_ewma(eq.ewma_delta_c, delta_c, self.cfg.ewma_alpha)
@@ -174,7 +234,7 @@ class MonitoringService:
 
             reading, updated_eq, alert_rec = self.store.record_reading_and_state(
                 bay_id=bay_id,
-                sensor_id=sensor_id,
+                sensor_id=resolved_sensor,
                 temperature_c=temperature_c,
                 delta_c=delta_c,
                 recorded_at=ts,
@@ -196,13 +256,12 @@ class MonitoringService:
                 alert_event=alert_event,
                 applied_to_detector=True,
                 out_of_order=False,
+                duplicate=False,
             )
 
     def ingest_batch(self, readings: Sequence[ReadingInput]) -> list[IngestionResult]:
-        """Validate all bay IDs up front, then ingest readings atomically in sequence."""
+        """Validate and ingest a batch of readings inside a single atomic transaction."""
         with self.store.transaction():
-            for bay_id in dict.fromkeys(item.bay_id for item in readings):
-                self.store.get_equipment(bay_id)
             return [
                 self.ingest_reading(
                     item.bay_id,

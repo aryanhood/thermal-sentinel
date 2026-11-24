@@ -9,6 +9,7 @@ type Tab = "replay" | "benchmark";
 export default function App() {
   const [tab, setTab] = useState<Tab>("replay");
   const [catalog, setCatalog] = useState<CatalogIndex | null>(null);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
   const [caseId, setCaseId] = useState<string>("seed-3-b5");
   const [doc, setDoc] = useState<ScenarioDocument | null>(null);
   const [docLoading, setDocLoading] = useState(false);
@@ -28,17 +29,18 @@ export default function App() {
       .then((data) => {
         if (cancelled) return;
         setCatalog(data);
-        if (!data.scenarios.some((s) => s.case_id === caseId) && data.scenarios[0]) {
-          setCaseId(data.scenarios[0].case_id);
-        }
+        setCatalogError(null);
+        setCaseId((prev) =>
+          data.scenarios.some((s) => s.case_id === prev) ? prev : (data.scenarios[0]?.case_id ?? prev),
+        );
       })
       .catch((err: unknown) => {
-        if (!cancelled) setDocError(err instanceof Error ? err.message : "Failed to load catalog");
+        if (!cancelled) setCatalogError(err instanceof Error ? err.message : "Failed to load catalog");
       });
     return () => {
       cancelled = true;
     };
-  }, [caseId]);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -165,7 +167,7 @@ export default function App() {
             onSelectCase={setCaseId}
             doc={doc}
             loading={docLoading}
-            error={docError}
+            error={catalogError ?? docError}
           />
         ) : (
           <BenchmarkView

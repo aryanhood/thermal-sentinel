@@ -42,7 +42,8 @@ export function ReplayView({ catalog, caseId, onSelectCase, doc, loading, error 
   const [showGroundTruth, setShowGroundTruth] = useState(true);
   const [eventFilter, setEventFilter] = useState<"adaptive" | "fixed">("adaptive");
 
-  const maxTick = doc ? doc.adaptive.frames.t.length - 1 : 0;
+  const maxTick = doc ? Math.max(0, doc.adaptive.frames.t.length - 1) : 0;
+  const safeTick = Math.max(0, Math.min(tick, maxTick));
 
   // Reset playback when scenario changes
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally reset on caseId change
@@ -52,16 +53,16 @@ export function ReplayView({ catalog, caseId, onSelectCase, doc, loading, error 
   }, [caseId]);
 
   useEffect(() => {
+    if (playing && maxTick > 0 && tick >= maxTick) {
+      setPlaying(false);
+    }
+  }, [playing, maxTick, tick]);
+
+  useEffect(() => {
     if (!playing || !doc || maxTick === 0) return;
     const intervalMs = Math.max(25, Math.round((doc.scenario.dt_s * 1000) / speed));
     const id = window.setInterval(() => {
-      setTick((prev) => {
-        if (prev >= maxTick) {
-          setPlaying(false);
-          return maxTick;
-        }
-        return prev + 1;
-      });
+      setTick((prev) => (prev >= maxTick ? maxTick : prev + 1));
     }, intervalMs);
     return () => window.clearInterval(id);
   }, [playing, doc, maxTick, speed]);
@@ -79,7 +80,13 @@ export function ReplayView({ catalog, caseId, onSelectCase, doc, loading, error 
     if (match) onSelectCase(match.case_id);
   };
 
-  const currentTime = doc?.adaptive.frames.t[tick] ?? 0;
+  const currentTime = doc?.adaptive.frames.t[safeTick] ?? 0;
+
+  const markerLeft = (t: number) => {
+    const horizon = doc?.scenario.horizon_s ?? 1;
+    const pct = horizon > 0 ? (t / horizon) * 100 : 0;
+    return `${Math.min(100, Math.max(0, pct))}%`;
+  };
 
   const activeDecision = useMemo(
     () => (doc ? latestDecision(doc.adaptive.decisions, currentTime) : null),
@@ -177,7 +184,7 @@ export function ReplayView({ catalog, caseId, onSelectCase, doc, loading, error 
             <button
               type="button"
               onClick={() => {
-                if (tick >= maxTick) setTick(0);
+                if (safeTick >= maxTick) setTick(0);
                 setPlaying((p) => !p);
               }}
               aria-label={playing ? "Pause" : "Play"}
@@ -235,7 +242,7 @@ export function ReplayView({ catalog, caseId, onSelectCase, doc, loading, error 
                 aria-label="Simulation timeline"
                 min={0}
                 max={maxTick}
-                value={tick}
+                value={safeTick}
                 onChange={(e) => {
                   setPlaying(false);
                   setTick(Number(e.target.value));
@@ -249,7 +256,7 @@ export function ReplayView({ catalog, caseId, onSelectCase, doc, loading, error 
               <div className="relative mt-1.5 h-4 font-mono text-[10px]">
                 <span
                   style={{
-                    left: `${(doc.scenario.fault_onset_s / doc.scenario.horizon_s) * 100}%`,
+                    left: markerLeft(doc.scenario.fault_onset_s),
                   }}
                   className="absolute -translate-x-1/2 text-rose-400"
                   title={`Fault onset at ${doc.scenario.fault_onset_s}s`}
@@ -259,11 +266,7 @@ export function ReplayView({ catalog, caseId, onSelectCase, doc, loading, error 
                 {doc.adaptive.metrics.time_to_confirm_s !== null && (
                   <span
                     style={{
-                      left: `${
-                        ((doc.scenario.fault_onset_s + doc.adaptive.metrics.time_to_confirm_s) /
-                          doc.scenario.horizon_s) *
-                        100
-                      }%`,
+                      left: markerLeft(doc.scenario.fault_onset_s + doc.adaptive.metrics.time_to_confirm_s),
                     }}
                     className="absolute -translate-x-1/2 text-emerald-400"
                   >
@@ -273,11 +276,7 @@ export function ReplayView({ catalog, caseId, onSelectCase, doc, loading, error 
                 {doc.fixed.metrics.time_to_confirm_s !== null && (
                   <span
                     style={{
-                      left: `${
-                        ((doc.scenario.fault_onset_s + doc.fixed.metrics.time_to_confirm_s) /
-                          doc.scenario.horizon_s) *
-                        100
-                      }%`,
+                      left: markerLeft(doc.scenario.fault_onset_s + doc.fixed.metrics.time_to_confirm_s),
                     }}
                     className="absolute -translate-x-1/2 text-sky-400"
                   >
@@ -360,7 +359,7 @@ export function ReplayView({ catalog, caseId, onSelectCase, doc, loading, error 
               accent="sky"
               scenario={doc.scenario}
               run={doc.fixed}
-              tick={tick}
+              tick={safeTick}
               showGroundTruth={showGroundTruth}
             />
             <FloorMap
@@ -369,7 +368,7 @@ export function ReplayView({ catalog, caseId, onSelectCase, doc, loading, error 
               accent="emerald"
               scenario={doc.scenario}
               run={doc.adaptive}
-              tick={tick}
+              tick={safeTick}
               showGroundTruth={showGroundTruth}
             />
           </div>

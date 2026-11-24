@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Path, Query
 
 from ...storage import MonitoringStore
 from ..deps import get_store
@@ -26,7 +26,7 @@ def list_alerts(
 
 @router.post("/{alert_id}/acknowledge", response_model=AlertResponse)
 def acknowledge_alert(
-    alert_id: int,
+    alert_id: Annotated[int, Path(ge=1)],
     store: Annotated[MonitoringStore, Depends(get_store)],
 ) -> AlertResponse:
     return AlertResponse.model_validate(store.acknowledge_alert(alert_id))
