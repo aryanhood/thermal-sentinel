@@ -140,9 +140,9 @@ class MonitoringService:
     ) -> IngestionResult:
         """Process one sensor reading atomically and persist updated equipment and alert state."""
         _require_finite(temperature_c)
-        now_utc = _to_utc(self._clock())
 
         with self.store.transaction():
+            now_utc = _to_utc(self._clock())
             eq = self.store.get_equipment(bay_id)
             resolved_sensor = eq.sensor_id if sensor_id is None else sensor_id
             if resolved_sensor != eq.sensor_id:
@@ -150,17 +150,7 @@ class MonitoringService:
                     f"Sensor {resolved_sensor!r} is not bound to bay {bay_id!r} (expected {eq.sensor_id!r})"
                 )
 
-            if recorded_at is not None:
-                ts = _to_utc(recorded_at)
-                if ts > now_utc + timedelta(seconds=self.max_future_skew_s):
-                    raise InvalidTimestampError(
-                        f"Reading timestamp {ts.isoformat()} exceeds allowed future clock skew "
-                        f"({self.max_future_skew_s:g}s)"
-                    )
-            else:
-                ts = now_utc
-                if eq.last_reading_at is not None and ts <= eq.last_reading_at:
-                    ts = eq.last_reading_at + timedelta(microseconds=1)
+            ts = self._resolve_reading_timestamp(eq, recorded_at, now_utc)
 
             delta_c = temperature_c - eq.baseline_temp_c
             existing = self.store.get_reading_by_timestamp(bay_id, ts)
@@ -271,6 +261,32 @@ class MonitoringService:
                 )
                 for item in readings
             ]
+
+    def _resolve_reading_timestamp(
+        self,
+        eq: EquipmentRecord,
+        recorded_at: datetime | None,
+        now_utc: datetime,
+    ) -> datetime:
+        max_allowed_ts = now_utc + timedelta(seconds=self.max_future_skew_s)
+        if recorded_at is not None:
+            ts = _to_utc(recorded_at)
+            if ts > max_allowed_ts:
+                raise InvalidTimestampError(
+                    f"Reading timestamp {ts.isoformat()} exceeds allowed future clock skew "
+                    f"({self.max_future_skew_s:g}s)"
+                )
+            return ts
+
+        ts = now_utc
+        if eq.last_reading_at is not None and ts <= eq.last_reading_at:
+            ts = eq.last_reading_at + timedelta(microseconds=1)
+        if ts > max_allowed_ts:
+            raise InvalidTimestampError(
+                f"Automatic reading timestamp {ts.isoformat()} exceeds allowed future clock skew "
+                f"({self.max_future_skew_s:g}s)"
+            )
+        return ts
 
     def _evaluate_detector(
         self,

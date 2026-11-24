@@ -35,7 +35,12 @@ def _to_ingestion_response(result: IngestionResult) -> IngestionResponse:
     )
 
 
-@router.post("", response_model=IngestionResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=IngestionResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses={status.HTTP_200_OK: {"model": IngestionResponse, "description": "Duplicate reading retry"}},
+)
 def ingest_reading(
     response: Response,
     payload: ReadingCreateRequest,
@@ -52,8 +57,19 @@ def ingest_reading(
     return _to_ingestion_response(result)
 
 
-@router.post("/batch", response_model=BatchIngestionResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/batch",
+    response_model=BatchIngestionResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        status.HTTP_200_OK: {
+            "model": BatchIngestionResponse,
+            "description": "All readings in the batch were duplicate retries",
+        }
+    },
+)
 def ingest_batch(
+    response: Response,
     payload: BatchReadingsRequest,
     service: Annotated[MonitoringService, Depends(get_service)],
 ) -> BatchIngestionResponse:
@@ -67,16 +83,20 @@ def ingest_batch(
         for item in payload.readings
     ]
     results = service.ingest_batch(items)
+    created = sum(1 for item in results if not item.duplicate)
+    duplicate = sum(1 for item in results if item.duplicate)
+    out_of_order = sum(1 for item in results if item.out_of_order and not item.duplicate)
     opened = sum(1 for item in results if item.alert_event == "opened")
     resolved = sum(1 for item in results if item.alert_event == "resolved")
-    out_of_order = sum(1 for item in results if item.out_of_order)
-    duplicate = sum(1 for item in results if item.duplicate)
+    if created == 0:
+        response.status_code = status.HTTP_200_OK
     return BatchIngestionResponse(
-        ingested_count=len(results),
+        total_count=len(results),
+        created_count=created,
+        duplicate_count=duplicate,
+        out_of_order_count=out_of_order,
         alerts_opened=opened,
         alerts_resolved=resolved,
-        out_of_order_count=out_of_order,
-        duplicate_count=duplicate,
         results=[_to_ingestion_response(item) for item in results],
     )
 

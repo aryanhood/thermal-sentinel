@@ -154,13 +154,83 @@ def test_batch_validation_rollback_late_readings_and_baseline(tmp_path: Path) ->
             },
         )
         assert ok_batch.status_code == 201
-        assert ok_batch.json()["out_of_order_count"] == 1
-        assert ok_batch.json()["duplicate_count"] == 0
+        ok_body = ok_batch.json()
+        assert ok_body["total_count"] == 3
+        assert ok_body["created_count"] == 3
+        assert ok_body["duplicate_count"] == 0
+        assert ok_body["out_of_order_count"] == 1
+        assert ok_body["alerts_opened"] == 1
         assert client.get("/api/v1/equipment/B1").json()["alert_active"] is True
+
+        # Exact batch retry must return HTTP 200 with zero new creations or duplicate alert events
+        dup_batch = client.post(
+            "/api/v1/readings/batch",
+            json={
+                "readings": [
+                    {"bay_id": "B1", "temperature_c": 34.0, "recorded_at": t0.isoformat()},
+                    {"bay_id": "B1", "temperature_c": 28.0, "recorded_at": (t0 - timedelta(seconds=5)).isoformat()},
+                    {"bay_id": "B2", "temperature_c": 28.1, "recorded_at": t0.isoformat()},
+                ]
+            },
+        )
+        assert dup_batch.status_code == 200
+        dup_body = dup_batch.json()
+        assert dup_body["total_count"] == 3
+        assert dup_body["created_count"] == 0
+        assert dup_body["duplicate_count"] == 3
+        assert dup_body["out_of_order_count"] == 0
+        assert dup_body["alerts_opened"] == 0
+        assert all(item["duplicate"] for item in dup_body["results"])
+
+        # Mixed batch (1 existing duplicate + 1 new) and intra-batch duplicate both return HTTP 201
+        mixed_batch = client.post(
+            "/api/v1/readings/batch",
+            json={
+                "readings": [
+                    {"bay_id": "B2", "temperature_c": 28.1, "recorded_at": t0.isoformat()},
+                    {"bay_id": "B3", "temperature_c": 28.4, "recorded_at": t0.isoformat()},
+                ]
+            },
+        )
+        assert mixed_batch.status_code == 201
+        mixed_body = mixed_batch.json()
+        assert mixed_body["total_count"] == 2
+        assert mixed_body["created_count"] == 1
+        assert mixed_body["duplicate_count"] == 1
+
+        intra_batch = client.post(
+            "/api/v1/readings/batch",
+            json={
+                "readings": [
+                    {"bay_id": "B4", "temperature_c": 28.6, "recorded_at": t0.isoformat()},
+                    {"bay_id": "B4", "temperature_c": 28.6, "recorded_at": t0.isoformat()},
+                ]
+            },
+        )
+        assert intra_batch.status_code == 201
+        intra_body = intra_batch.json()
+        assert intra_body["total_count"] == 2
+        assert intra_body["created_count"] == 1
+        assert intra_body["duplicate_count"] == 1
 
         patched = client.patch("/api/v1/equipment/B1/baseline", json={"baseline_temp_c": 30.0})
         assert patched.status_code == 200
         assert client.get("/health").json()["open_alerts"] == 0
+
+
+def test_automatic_reading_exceeding_skew_returns_422(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    t0 = datetime(2026, 2, 1, 10, 0, 0, tzinfo=UTC)
+    app = create_app(db_path=tmp_path / "skew.db", policy="adaptive")
+    with TestClient(app) as client:
+        monkeypatch.setattr(app.state.service, "_clock", lambda: t0)
+        at_limit = client.post(
+            "/api/v1/readings",
+            json={"bay_id": "B1", "temperature_c": 28.5, "recorded_at": (t0 + timedelta(seconds=5)).isoformat()},
+        )
+        assert at_limit.status_code == 201
+
+        overflow = client.post("/api/v1/readings", json={"bay_id": "B1", "temperature_c": 29.0})
+        assert overflow.status_code == 422
 
 
 def test_isolated_simulation_replay_endpoint_preserves_operational_data(tmp_path: Path) -> None:

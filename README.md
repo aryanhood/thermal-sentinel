@@ -10,7 +10,7 @@ It receives temperature readings over a REST API, binds one sensor per equipment
 
 ## What It Does
 
-- **One-Sensor-Per-Bay Ingestion (`FastAPI`):** Accepts single or batch temperature readings bound to each bay's configured sensor (`thermocouple-B1`..`thermocouple-B6` by default). Exact retries return HTTP `200` (`duplicate: true`) without double-updating detectors, conflicting values at an existing timestamp return `409`, future timestamps beyond 5 s skew return `422`, and older out-of-order readings are archived (`out_of_order: true`) without changing live detector state.
+- **One-Sensor-Per-Bay Ingestion (`FastAPI`):** Accepts single or batch temperature readings bound to each bay's configured sensor (`thermocouple-B1`..`thermocouple-B6` by default). Batches return `201` when at least one new reading is stored (`created_count > 0`) and `200` when every item is an exact retry (`created_count == 0`). Single exact retries also return `200` (`duplicate: true`) without double-updating detectors, conflicting values at an existing timestamp return `409`, explicit or server-assigned timestamps exceeding the 5 s future skew limit return `422`, and older out-of-order readings are archived (`out_of_order: true`) without changing live detector state.
 - **SQLite Storage:** Saves equipment, readings, alerts, and inspection logs using WAL mode and serialized `BEGIN IMMEDIATE` transactions so concurrent requests and batches stay consistent.
 - **Trend Monitoring & Alert Lifecycle:** Tracks heating above each bay's baseline using EWMA, Page's CUSUM, and a 3-state Bayesian HMM. Alerts move cleanly through `open` → `acknowledged` → `confirmed` / `resolved`. Updating a bay's baseline resolves any active alerts on that bay in the same transaction.
 - **Inspection Planner:** Ranks which bay needs attention next using fault risk, time since last visit, and travel distance, and rejects stale verification timestamps older than prior checks or active alerts (`409`).
@@ -35,7 +35,7 @@ flowchart LR
 | `GET /health` | Health check (`200` when healthy, `503` if SQLite check fails), active policy, and open alert count |
 | `GET / POST /api/v1/equipment` | List or register equipment bays with unique bound `sensor_id` |
 | `PATCH /api/v1/equipment/{bay_id}/baseline` | Update baseline temperature and resolve active alerts on that bay |
-| `POST / GET /api/v1/readings` | Ingest or query timestamped readings (`/batch` rolls back atomically on any failure) |
+| `POST / GET /api/v1/readings` | Ingest or query timestamped readings (`201` on new data, `200` on duplicate-only retry; `/batch` rolls back atomically on failure) |
 | `GET / POST /api/v1/alerts` | List alerts or acknowledge an open alert via `/{alert_id}/acknowledge` |
 | `GET /api/v1/inspection/next` | Get the next recommended bay for robot inspection |
 | `POST /api/v1/inspection/verify` | Record a close-range camera check (`confirmed`, `watch`, `false_alarm`, `nominal`) |

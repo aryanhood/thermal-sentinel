@@ -105,6 +105,58 @@ def test_sensor_binding_dedup_conflict_and_timestamp_policies() -> None:
         assert mono.reading.recorded_at > before_eq.last_reading_at  # type: ignore[operator]
 
 
+def test_automatic_timestamp_respects_future_clock_skew_policy() -> None:
+    t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    now_ref = [t0]
+    with MonitoringStore(":memory:") as store:
+        service = MonitoringService(store, policy=Policy.ADAPTIVE, max_future_skew_s=5.0, clock=lambda: now_ref[0])
+
+        # Explicit reading just below skew limit lets one automatic reading succeed at exact boundary t0 + 5.0s
+        service.ingest_reading("B1", 28.5, recorded_at=t0 + timedelta(seconds=5) - timedelta(microseconds=1))
+        at_limit = service.ingest_reading("B1", 29.0)
+        assert at_limit.reading.recorded_at == t0 + timedelta(seconds=5)
+
+        before_eq = store.get_equipment("B1")
+        with pytest.raises(InvalidTimestampError, match="Automatic reading timestamp"):
+            service.ingest_reading("B1", 29.5)
+        assert store.get_equipment("B1") == before_eq
+        assert len(store.list_readings(bay_id="B1")) == 2
+
+        # Advancing clock lets automatic ingestion resume cleanly
+        now_ref[0] = t0 + timedelta(seconds=1)
+        resumed = service.ingest_reading("B1", 29.5)
+        assert resumed.reading.recorded_at == t0 + timedelta(seconds=5, microseconds=1)
+
+        # Backward clock step behind last_reading_at by > max_future_skew_s rejects automatic readings
+        now_ref[0] = t0 + timedelta(seconds=20)
+        service.ingest_reading("B2", 28.5)
+        now_ref[0] = t0
+        with pytest.raises(InvalidTimestampError, match="Automatic reading timestamp"):
+            service.ingest_reading("B2", 29.0)
+        assert len(store.list_readings(bay_id="B2")) == 1
+
+        # Batch rolls back completely if an automatic reading crosses max_future_skew_s
+        now_ref[0] = t0 + timedelta(seconds=1)
+        service.ingest_reading("B3", 28.1, recorded_at=t0 + timedelta(seconds=6))
+        with pytest.raises(InvalidTimestampError, match="Automatic reading timestamp"):
+            service.ingest_batch(
+                [
+                    ReadingInput(bay_id="B4", temperature_c=35.0),
+                    ReadingInput(bay_id="B3", temperature_c=29.0),
+                ]
+            )
+        assert store.list_readings(bay_id="B4") == []
+        assert len(store.list_readings(bay_id="B3")) == 1
+
+        # Zero-skew policy allows one automatic reading at t0 but rejects a second bump beyond now
+        zero_skew_svc = MonitoringService(store, policy=Policy.ADAPTIVE, max_future_skew_s=0.0, clock=lambda: t0)
+        first_zero = zero_skew_svc.ingest_reading("B5", 28.0)
+        assert first_zero.reading.recorded_at == t0
+        with pytest.raises(InvalidTimestampError, match="Automatic reading timestamp"):
+            zero_skew_svc.ingest_reading("B5", 28.2)
+        assert len(store.list_readings(bay_id="B5")) == 1
+
+
 def test_bayesian_rejects_isolated_glitch_and_catches_sustained_ramp() -> None:
     t0 = datetime(2026, 1, 1, tzinfo=UTC)
     with MonitoringStore(":memory:") as store:

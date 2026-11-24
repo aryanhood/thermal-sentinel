@@ -128,6 +128,29 @@ def test_verification_outcomes_and_stale_inspection_rejection() -> None:
         assert nom_eq.status == "nominal"
 
 
+def test_automatic_verification_timestamp_respects_clock_skew() -> None:
+    t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    now_ref = [t0 + timedelta(seconds=30)]
+    with MonitoringStore(":memory:") as store:
+        service = MonitoringService(store, policy=Policy.ADAPTIVE, max_future_skew_s=5.0, clock=lambda: now_ref[0])
+        planner = InspectionPlanner(store, policy=Policy.ADAPTIVE, max_future_skew_s=5.0, clock=lambda: now_ref[0])
+
+        # Verify B1 at t0 + 30s, then step clock back to t0 (exceeding 5s skew)
+        planner.verify_inspection("B1", 28.0)
+        now_ref[0] = t0
+        with pytest.raises(InvalidTimestampError, match="Automatic inspection timestamp"):
+            planner.verify_inspection("B1", 28.0)
+
+        # Open an active alert on B2 at t0 + 30s, then step clock back to t0
+        now_ref[0] = t0 + timedelta(seconds=30)
+        for offset in range(3):
+            service.ingest_reading("B2", 33.0, recorded_at=t0 + timedelta(seconds=28 + offset))
+        assert store.get_active_alert("B2") is not None
+        now_ref[0] = t0
+        with pytest.raises(InvalidTimestampError, match="Automatic inspection timestamp"):
+            planner.verify_inspection("B2", 28.0)
+
+
 def test_simulation_replay_is_completely_isolated_from_operational_store() -> None:
     t0 = datetime(2026, 2, 1, 9, 0, 0, tzinfo=UTC)
     with MonitoringStore(":memory:") as store:

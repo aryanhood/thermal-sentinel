@@ -140,11 +140,12 @@ class IngestionResponse(BaseModel):
 
 
 class BatchIngestionResponse(BaseModel):
-    ingested_count: int
+    total_count: int
+    created_count: int
+    duplicate_count: int
+    out_of_order_count: int
     alerts_opened: int
     alerts_resolved: int
-    out_of_order_count: int
-    duplicate_count: int
     results: list[IngestionResponse]
 
 

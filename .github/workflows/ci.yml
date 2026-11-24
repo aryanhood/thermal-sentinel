@@ -21,12 +21,13 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v10.4.0
         with:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
+          cache-dependency-glob: pyproject.toml
 
       - name: Install dependencies
         run: uv sync
@@ -53,9 +54,9 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
 
@@ -69,7 +70,7 @@ jobs:
     name: Docker Build & Smoke Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build Docker image
         run: docker build -t thermal-sentinel:ci .
@@ -110,6 +111,32 @@ jobs:
           with urllib.request.urlopen(req, timeout=5) as retry_resp:
               assert retry_resp.status == 200
               assert json.loads(retry_resp.read().decode())["duplicate"] is True
+
+          batch_payload = json.dumps({
+              "readings": [{
+                  "bay_id": "B4",
+                  "temperature_c": 28.5,
+                  "sensor_id": "thermocouple-B4",
+                  "recorded_at": "2026-01-01T00:00:00Z",
+              }]
+          }).encode()
+          batch_req = urllib.request.Request(
+              "http://127.0.0.1:8000/api/v1/readings/batch",
+              data=batch_payload,
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          with urllib.request.urlopen(batch_req, timeout=5) as batch_resp:
+              assert batch_resp.status == 201
+              batch_body = json.loads(batch_resp.read().decode())
+              assert batch_body["created_count"] == 1
+              assert batch_body["duplicate_count"] == 0
+
+          with urllib.request.urlopen(batch_req, timeout=5) as batch_retry:
+              assert batch_retry.status == 200
+              retry_body = json.loads(batch_retry.read().decode())
+              assert retry_body["created_count"] == 0
+              assert retry_body["duplicate_count"] == 1
 
           with urllib.request.urlopen("http://127.0.0.1:8000/api/v1/inspection/next", timeout=5) as resp:
               assert resp.status == 200

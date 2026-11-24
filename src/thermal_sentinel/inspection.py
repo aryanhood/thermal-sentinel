@@ -209,9 +209,9 @@ class InspectionPlanner:
     ) -> tuple[InspectionLogRecord, EquipmentRecord]:
         """Submit a close-range thermal camera check and update alert/equipment state atomically."""
         _require_finite(camera_temp_c, robot_x_m, robot_y_m)
-        now_utc = _to_utc(self._clock())
 
         with self.store.transaction():
+            now_utc = _to_utc(self._clock())
             eq = self.store.get_equipment(bay_id)
             active_alert = self.store.get_active_alert(bay_id)
             ts = self._resolve_verification_timestamp(eq, active_alert, inspected_at, now_utc)
@@ -242,9 +242,10 @@ class InspectionPlanner:
         inspected_at: datetime | None,
         now_utc: datetime,
     ) -> datetime:
+        max_allowed_ts = now_utc + timedelta(seconds=self.max_future_skew_s)
         if inspected_at is not None:
             ts = _to_utc(inspected_at)
-            if ts > now_utc + timedelta(seconds=self.max_future_skew_s):
+            if ts > max_allowed_ts:
                 raise InvalidTimestampError(
                     f"Inspection timestamp {ts.isoformat()} exceeds allowed future clock skew "
                     f"({self.max_future_skew_s:g}s)"
@@ -266,7 +267,13 @@ class InspectionPlanner:
             floor_candidates.append(eq.last_inspected_at)
         if active_alert is not None:
             floor_candidates.append(active_alert.created_at)
-        return max(floor_candidates)
+        ts = max(floor_candidates)
+        if ts > max_allowed_ts:
+            raise InvalidTimestampError(
+                f"Automatic inspection timestamp {ts.isoformat()} exceeds allowed future clock skew "
+                f"({self.max_future_skew_s:g}s)"
+            )
+        return ts
 
     def _classify_verification(
         self,
