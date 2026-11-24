@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -58,7 +60,8 @@ CREATE TABLE IF NOT EXISTS sensor_readings (
     temperature_c REAL NOT NULL,
     delta_c REAL NOT NULL,
     recorded_at TEXT NOT NULL,
-    ingested_at TEXT NOT NULL
+    ingested_at TEXT NOT NULL,
+    out_of_order INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_readings_bay_time
@@ -156,6 +159,7 @@ class SensorReadingRecord:
     delta_c: float
     recorded_at: datetime
     ingested_at: datetime
+    out_of_order: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,6 +243,7 @@ def _row_to_reading(row: sqlite3.Row) -> SensorReadingRecord:
         delta_c=float(row["delta_c"]),
         recorded_at=_parse_ts(str(row["recorded_at"])),
         ingested_at=_parse_ts(str(row["ingested_at"])),
+        out_of_order=bool(row["out_of_order"]),
     )
 
 
@@ -287,15 +292,17 @@ class MonitoringStore:
         if target != ":memory:" and not target.startswith("file:"):
             Path(target).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(target, check_same_thread=False)
+        self._tx_depth = 0
+        self._conn = sqlite3.connect(target, check_same_thread=False, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
-        with self._lock, self._conn:
+        with self._lock:
             self._conn.execute("PRAGMA foreign_keys = ON;")
             if target != ":memory:":
                 self._conn.execute("PRAGMA journal_mode = WAL;")
                 self._conn.execute("PRAGMA busy_timeout = 5000;")
             self._conn.executescript(_SCHEMA_SQL)
-            if seed_defaults:
+        if seed_defaults:
+            with self.transaction():
                 count_row = self._conn.execute("SELECT COUNT(*) AS n FROM equipment").fetchone()
                 if count_row is not None and int(count_row["n"]) == 0:
                     self._conn.executemany(
@@ -305,6 +312,26 @@ class MonitoringStore:
                         """,
                         [(bay.id, bay.label, bay.x, bay.y, default_baseline_c) for bay in DEFAULT_BAYS],
                     )
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Serialize access across threads and wrap writes in an immediate SQLite transaction."""
+        with self._lock:
+            outermost = self._tx_depth == 0
+            if outermost:
+                self._conn.execute("BEGIN IMMEDIATE")
+            self._tx_depth += 1
+            try:
+                yield
+            except BaseException:
+                if outermost and self._conn.in_transaction:  # pragma: no branch
+                    self._conn.execute("ROLLBACK")
+                raise
+            else:
+                if outermost and self._conn.in_transaction:  # pragma: no branch
+                    self._conn.execute("COMMIT")
+            finally:
+                self._tx_depth -= 1
 
     def __enter__(self) -> Self:
         return self
@@ -347,7 +374,7 @@ class MonitoringStore:
         y_m: float,
         baseline_temp_c: float = 28.0,
     ) -> EquipmentRecord:
-        with self._lock, self._conn:
+        with self.transaction():
             try:
                 self._conn.execute(
                     """
@@ -361,7 +388,9 @@ class MonitoringStore:
             return self.get_equipment(bay_id)
 
     def update_baseline(self, bay_id: str, baseline_temp_c: float) -> EquipmentRecord:
-        with self._lock, self._conn:
+        """Update a bay's baseline temperature, reset detector state, and resolve active alerts."""
+        resolved_ts = _fmt_ts(_to_utc())
+        with self.transaction():
             self.get_equipment(bay_id)
             self._conn.execute(
                 """
@@ -390,9 +419,45 @@ class MonitoringStore:
                     bay_id,
                 ),
             )
+            self._conn.execute(
+                """
+                UPDATE alerts
+                SET status = 'resolved', resolved_at = ?
+                WHERE bay_id = ? AND status IN ('open', 'acknowledged')
+                """,
+                (resolved_ts, bay_id),
+            )
             return self.get_equipment(bay_id)
 
     # -- readings & alerts ---------------------------------------------------------------
+    def record_late_reading(
+        self,
+        *,
+        bay_id: str,
+        sensor_id: str,
+        temperature_c: float,
+        delta_c: float,
+        recorded_at: datetime,
+    ) -> tuple[SensorReadingRecord, EquipmentRecord]:
+        """Store an out-of-order reading for audit history without altering live equipment or alerts."""
+        recorded_ts = _fmt_ts(recorded_at)
+        ingested_ts = _fmt_ts(_to_utc())
+        with self.transaction():
+            eq = self.get_equipment(bay_id)
+            cur = self._conn.execute(
+                """
+                INSERT INTO sensor_readings (
+                    bay_id, sensor_id, temperature_c, delta_c, recorded_at, ingested_at, out_of_order
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 1)
+                """,
+                (bay_id, sensor_id, temperature_c, delta_c, recorded_ts, ingested_ts),
+            )
+            reading_id = int(cur.lastrowid or 0)
+            reading_row = self._conn.execute("SELECT * FROM sensor_readings WHERE id = ?", (reading_id,)).fetchone()
+            assert reading_row is not None
+            return _row_to_reading(reading_row), eq
+
     def record_reading_and_state(
         self,
         *,
@@ -416,7 +481,7 @@ class MonitoringStore:
         ingested_ts = _fmt_ts(_to_utc())
         rearm_ts = None if rearm_after is None else _fmt_ts(rearm_after)
 
-        with self._lock, self._conn:
+        with self.transaction():
             self.get_equipment(bay_id)
             cur = self._conn.execute(
                 """
@@ -552,7 +617,7 @@ class MonitoringStore:
             return [_row_to_alert(row) for row in rows]
 
     def acknowledge_alert(self, alert_id: int) -> AlertRecord:
-        with self._lock, self._conn:
+        with self.transaction():
             row = self._conn.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone()
             if row is None:
                 raise AlertNotFoundError(alert_id)
@@ -579,7 +644,7 @@ class MonitoringStore:
         created_at: datetime | None = None,
     ) -> InspectionLogRecord:
         ts = _fmt_ts(_to_utc(created_at))
-        with self._lock, self._conn:
+        with self.transaction():
             self.get_equipment(bay_id)
             cur = self._conn.execute(
                 """
@@ -618,7 +683,7 @@ class MonitoringStore:
     ) -> tuple[InspectionLogRecord, EquipmentRecord]:
         ts = _fmt_ts(inspected_at)
         rearm_ts = None if rearm_after is None else _fmt_ts(rearm_after)
-        with self._lock, self._conn:
+        with self.transaction():
             self.get_equipment(bay_id)
             self._conn.execute(
                 """
@@ -683,7 +748,8 @@ class MonitoringStore:
             return [_row_to_log(row) for row in rows]
 
     def reset_monitoring_state(self, *, baseline_overrides: dict[str, float] | None = None) -> None:
-        with self._lock, self._conn:
+        """Destructively delete all readings, alerts, and inspection logs and reset equipment state."""
+        with self.transaction():
             self._conn.execute("DELETE FROM sensor_readings")
             self._conn.execute("DELETE FROM alerts")
             self._conn.execute("DELETE FROM inspection_logs")

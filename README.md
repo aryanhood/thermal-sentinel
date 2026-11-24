@@ -10,11 +10,11 @@ This system receives timestamped temperature readings over a REST API, stores eq
 
 ## 1. What This Prototype Does
 
-- **Sensor Data Ingestion (`FastAPI`):** Accepts single or batch temperature readings via validated REST endpoints (`POST /api/v1/readings` and `POST /api/v1/readings/batch`).
-- **Persistent Storage (`SQLite`):** Stores equipment bay configurations, timestamped sensor readings, alert histories, and inspection verification logs in a thread-safe SQLite database.
-- **Thermal Trend Monitoring:** Tracks every reading through three sequential filters—EWMA, Page's CUSUM, and a 3-state Bayesian Hidden Markov Model (`NOMINAL`, `GLITCH`, `FAULT_RAMP`)—and raises or resolves alerts automatically.
+- **Sensor Data Ingestion (`FastAPI`):** Accepts single or batch temperature readings via validated REST endpoints (`POST /api/v1/readings` and `POST /api/v1/readings/batch`). Readings older than a bay's latest recorded timestamp are archived with `out_of_order: true` without altering live detector or alert state.
+- **Persistent Storage (`SQLite`):** Stores equipment bay configurations, timestamped sensor readings, alert histories, and inspection verification logs using serialized SQLite transactions (`BEGIN IMMEDIATE` + WAL mode).
+- **Thermal Trend Monitoring:** Tracks every in-order reading through three sequential filters—EWMA, Page's CUSUM, and a 3-state Bayesian Hidden Markov Model (`NOMINAL`, `GLITCH`, `FAULT_RAMP`)—and raises or resolves alerts automatically. Updating a bay baseline resets detector state and resolves active alerts on that bay in the same transaction.
 - **Inspection Prioritization:** Ranks which equipment bay needs attention next (`GET /api/v1/inspection/next`) based on active fault risk, time since last check, and robot travel distance, and records close-range verification outcomes (`POST /api/v1/inspection/verify`).
-- **Simulation Test Environment:** Includes a deterministic 6-bay simulation (`thermal-sentinel benchmark` and `POST /api/v1/simulation/replay`) to evaluate detection speed and false alarms fairly across identical sensor streams.
+- **Simulation Test Environment:** Includes a deterministic 6-bay simulation (`thermal-sentinel benchmark` and `POST /api/v1/simulation/replay`) to evaluate detection speed and false alarms fairly across identical sensor streams. By default, simulation replay preserves existing data (`reset_first: false`) and only wipes stored history when `reset_first: true` is passed explicitly.
 
 ---
 
@@ -42,16 +42,16 @@ For module details and state transitions, see [docs/architecture.md](docs/archit
 | `GET /health` | Service status, SQLite connectivity, active policy, and open alert count |
 | `GET /api/v1/equipment` | List all equipment bays and their latest thermal and detector states |
 | `POST /api/v1/equipment` | Register a new equipment bay and its baseline temperature |
-| `PATCH /api/v1/equipment/{bay_id}/baseline` | Update commissioned baseline temperature for a bay |
-| `POST /api/v1/readings` | Ingest one timestamped temperature reading and update alerts |
-| `POST /api/v1/readings/batch` | Validate and ingest a batch of readings in order |
+| `PATCH /api/v1/equipment/{bay_id}/baseline` | Update commissioned baseline temperature and resolve active alerts for a bay |
+| `POST /api/v1/readings` | Ingest one timestamped temperature reading (archives out-of-order timestamps safely) |
+| `POST /api/v1/readings/batch` | Validate and ingest a batch of readings atomically in sequence |
 | `GET /api/v1/readings` | Query stored readings (filter by `bay_id`, `since`, `limit`) |
 | `GET /api/v1/alerts` | List alerts (filter by `status` or `bay_id`) |
 | `POST /api/v1/alerts/{alert_id}/acknowledge` | Acknowledge an open alert |
 | `GET /api/v1/inspection/next` | Recommend the next equipment bay for inspection |
 | `POST /api/v1/inspection/verify` | Record a close-range camera check (`confirmed`, `watch`, `false_alarm`, `nominal`) |
 | `GET /api/v1/inspection/logs` | View robot dispatch and verification logs |
-| `POST /api/v1/simulation/replay` | Stream a simulated scenario into the live monitoring pipeline |
+| `POST /api/v1/simulation/replay` | Stream a simulated scenario into the API (`reset_first: false` by default) |
 
 ### Example API Workflow
 

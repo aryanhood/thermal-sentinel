@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -52,6 +52,8 @@ def test_readings_alerts_and_inspection_endpoints(tmp_path: Path) -> None:
         )
         assert single.status_code == 201
         assert single.json()["alert_event"] == "opened"
+        assert single.json()["applied_to_detector"] is True
+        assert single.json()["out_of_order"] is False
 
         batch = client.post(
             "/api/v1/readings/batch",
@@ -64,6 +66,7 @@ def test_readings_alerts_and_inspection_endpoints(tmp_path: Path) -> None:
         )
         assert batch.status_code == 201
         assert batch.json()["ingested_count"] == 2
+        assert batch.json()["out_of_order_count"] == 0
 
         readings = client.get("/api/v1/readings", params={"bay_id": "B1", "limit": 10})
         assert readings.status_code == 200
@@ -103,7 +106,7 @@ def test_simulation_replay_endpoint(tmp_path: Path) -> None:
     with TestClient(create_app(db_path=tmp_path / "replay.db", policy="bayesian")) as client:
         replay = client.post(
             "/api/v1/simulation/replay",
-            json={"seed": 3, "fault_bay_id": "B5", "max_ticks": 140, "reset_first": True},
+            json={"seed": 3, "fault_bay_id": "B5", "max_ticks": 140},
         )
         assert replay.status_code == 200
         assert replay.json()["recommended_bay"] == "B5"
@@ -113,3 +116,86 @@ def test_simulation_replay_endpoint(tmp_path: Path) -> None:
             json={"seed": 3, "fault_bay_id": "B9", "max_ticks": 20},
         )
         assert bad_replay.status_code == 400
+
+
+def test_late_readings_and_baseline_resolution_endpoints(tmp_path: Path) -> None:
+    t0 = datetime(2026, 2, 1, 10, 0, 0, tzinfo=UTC)
+    with TestClient(create_app(db_path=tmp_path / "late_baseline.db", policy="adaptive")) as client:
+        opened = client.post(
+            "/api/v1/readings",
+            json={"bay_id": "B1", "temperature_c": 34.0, "sensor_id": "field-b1", "recorded_at": t0.isoformat()},
+        )
+        assert opened.status_code == 201
+        assert opened.json()["alert_event"] == "opened"
+        assert client.get("/health").json()["open_alerts"] == 1
+
+        late_single = client.post(
+            "/api/v1/readings",
+            json={
+                "bay_id": "B1",
+                "temperature_c": 28.0,
+                "sensor_id": "late-single",
+                "recorded_at": (t0 - timedelta(seconds=5)).isoformat(),
+            },
+        )
+        assert late_single.status_code == 201
+        assert late_single.json()["out_of_order"] is True
+        assert late_single.json()["applied_to_detector"] is False
+        assert late_single.json()["equipment"]["alert_active"] is True
+        assert late_single.json()["equipment"]["latest_temp_c"] == 34.0
+
+        late_batch = client.post(
+            "/api/v1/readings/batch",
+            json={
+                "readings": [
+                    {
+                        "bay_id": "B1",
+                        "temperature_c": 27.9,
+                        "sensor_id": "late-batch",
+                        "recorded_at": (t0 - timedelta(seconds=2)).isoformat(),
+                    },
+                    {"bay_id": "B2", "temperature_c": 28.1, "sensor_id": "fresh-b2", "recorded_at": t0.isoformat()},
+                ]
+            },
+        )
+        assert late_batch.status_code == 201
+        assert late_batch.json()["out_of_order_count"] == 1
+        assert client.get("/api/v1/equipment/B1").json()["alert_active"] is True
+
+        patched = client.patch("/api/v1/equipment/B1/baseline", json={"baseline_temp_c": 30.0})
+        assert patched.status_code == 200
+        assert patched.json()["status"] == "nominal"
+        assert client.get("/health").json()["open_alerts"] == 0
+        assert client.get("/api/v1/alerts", params={"bay_id": "B1", "status": "open"}).json() == []
+        assert client.get("/api/v1/alerts", params={"bay_id": "B1", "status": "resolved"}).json()
+
+
+def test_replay_preserves_existing_data_unless_reset_requested(tmp_path: Path) -> None:
+    t0 = datetime(2026, 2, 1, 10, 0, 0, tzinfo=UTC)
+    with TestClient(create_app(db_path=tmp_path / "safe_replay.db", policy="adaptive")) as client:
+        client.post(
+            "/api/v1/readings",
+            json={"bay_id": "B1", "temperature_c": 34.0, "sensor_id": "field-b1", "recorded_at": t0.isoformat()},
+        )
+        assert client.get("/api/v1/inspection/next", params={"log_dispatch": "true"}).status_code == 200
+
+        replay_keep = client.post(
+            "/api/v1/simulation/replay",
+            json={"seed": 3, "fault_bay_id": "B5", "max_ticks": 140},
+        )
+        assert replay_keep.status_code == 200
+        # Existing reading, alert history, and inspection log on B1 are preserved (not wiped)
+        assert any(
+            r["sensor_id"] == "field-b1"
+            for r in client.get("/api/v1/readings", params={"bay_id": "B1", "limit": 200}).json()
+        )
+        assert client.get("/api/v1/alerts", params={"bay_id": "B1"}).json()
+        assert client.get("/api/v1/inspection/logs", params={"bay_id": "B1"}).json()
+
+        replay_reset = client.post(
+            "/api/v1/simulation/replay",
+            json={"seed": 3, "fault_bay_id": "B5", "max_ticks": 140, "reset_first": True},
+        )
+        assert replay_reset.status_code == 200
+        assert client.get("/api/v1/inspection/logs").json() == []
+        assert client.get("/api/v1/alerts", params={"bay_id": "B1"}).json() == []

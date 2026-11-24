@@ -34,9 +34,9 @@ flowchart LR
 
 | Module | Responsibility |
 |---|---|
-| `thermal_sentinel.storage` | Thread-safe SQLite repository (`equipment`, `sensor_readings`, `alerts`, `inspection_logs`) with UTC timestamps and WAL mode. |
-| `thermal_sentinel.monitoring` | Updates EWMA, Page CUSUM, and 3-state Bayesian HMM detectors per reading and opens/resolves alerts cleanly. |
-| `thermal_sentinel.inspection` | Computes next inspection targets (alert score, staleness guardrail, patrol route), verifies close-range checks, and replays simulation scenarios into the API. |
+| `thermal_sentinel.storage` | Thread-safe SQLite repository (`equipment`, `sensor_readings`, `alerts`, `inspection_logs`) using explicit `BEGIN IMMEDIATE` transactions, UTC timestamps, and WAL mode. |
+| `thermal_sentinel.monitoring` | Atomically checks timestamp ordering (archiving late readings with `out_of_order=True`), updates EWMA, Page CUSUM, and 3-state Bayesian HMM detectors, and opens/resolves alerts cleanly. |
+| `thermal_sentinel.inspection` | Computes next inspection targets (alert score, staleness guardrail, patrol route), verifies close-range checks atomically, and replays simulation scenarios into the API non-destructively by default (`reset_first=False`). |
 | `thermal_sentinel.api` | Modular FastAPI application (`routes/health.py`, `routes/equipment.py`, `routes/readings.py`, `routes/alerts.py`, `routes/inspection.py`) with Pydantic v2 validation. |
 | `thermal_sentinel.model` | Immutable `Bay` and `Scenario` dataclasses, validation, and SHA-256 named RNG streams (`seeded_rng`). |
 | `thermal_sentinel.environment` | Pre-computes ground-truth temperature ramps, noisy fixed thermocouple time series, and on-demand camera noise. |

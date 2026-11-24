@@ -92,13 +92,13 @@ def test_verification_outcomes_and_simulation_replay() -> None:
         assert conf_eq.alert_active is False
         assert store.list_alerts(status="confirmed", bay_id="B5")
 
-        # False alarm clearing on an alerted bay
+        # False alarm clearing on an alerted bay (timestamps strictly after replay's +69.5 s)
         adaptive_svc = MonitoringService(store, policy=Policy.ADAPTIVE)
         for step in range(4):
-            adaptive_svc.ingest_reading("B1", 32.0, recorded_at=t0 + timedelta(seconds=10 + step))
+            adaptive_svc.ingest_reading("B1", 32.0, recorded_at=t0 + timedelta(seconds=80 + step))
         assert store.get_equipment("B1").alert_active is True
         b1_base = store.get_equipment("B1").baseline_temp_c
-        fa_log, fa_eq = planner.verify_inspection("B1", b1_base + 0.1, inspected_at=t0 + timedelta(seconds=20))
+        fa_log, fa_eq = planner.verify_inspection("B1", b1_base + 0.1, inspected_at=t0 + timedelta(seconds=90))
         assert fa_log.outcome == "false_alarm"
         assert fa_eq.alert_active is False
         assert fa_eq.alert_armed is False
@@ -119,3 +119,34 @@ def test_replay_on_empty_store_without_reset() -> None:
         assert summary.readings_ingested == 60
         assert summary.fault_bay_id is None
         assert len(store.list_equipment()) == 6
+
+
+def test_replay_preserves_existing_data_by_default_and_resets_when_explicit() -> None:
+    t0 = datetime(2026, 2, 1, 9, 0, 0, tzinfo=UTC)
+    with MonitoringStore(":memory:") as store:
+        service = MonitoringService(store, policy=Policy.ADAPTIVE)
+        planner = InspectionPlanner(store, policy=Policy.ADAPTIVE)
+
+        # Pre-existing real monitoring history on B1
+        for sec in range(4):
+            service.ingest_reading("B1", 34.0, sensor_id="real-tc-1", recorded_at=t0 + timedelta(seconds=sec))
+        planner.next_target(now=t0 + timedelta(seconds=4), log_dispatch=True)
+        existing_alerts = store.list_alerts(bay_id="B1")
+        assert len(existing_alerts) == 1
+        assert len(store.list_inspection_logs(bay_id="B1")) == 1
+
+        # Default replay (reset_first=False) preserves existing readings, alerts, and logs
+        summary = planner.replay_scenario(service, seed=3, fault_bay_id="B5", max_ticks=140)
+        assert summary.readings_ingested == 840
+        assert any(r.sensor_id == "real-tc-1" for r in store.list_readings(bay_id="B1", limit=200))
+        assert len(store.list_alerts(bay_id="B1")) == 1
+        assert len(store.list_inspection_logs(bay_id="B1")) == 1
+        assert len(store.list_alerts(bay_id="B5")) >= 1
+        assert all(not r.out_of_order for r in store.list_readings(limit=1000))
+
+        # Explicit reset_first=True clears existing history as requested
+        reset_summary = planner.replay_scenario(service, seed=3, fault_bay_id="B5", max_ticks=140, reset_first=True)
+        assert reset_summary.recommended_bay == "B5"
+        assert not any(r.sensor_id == "real-tc-1" for r in store.list_readings(bay_id="B1", limit=200))
+        assert store.list_inspection_logs(bay_id="B1") == []
+        assert store.list_alerts(bay_id="B1") == []

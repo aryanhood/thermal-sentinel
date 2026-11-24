@@ -38,6 +38,8 @@ class IngestionResult:
     equipment: EquipmentRecord
     alert: AlertRecord | None
     alert_event: str | None
+    applied_to_detector: bool = True
+    out_of_order: bool = False
 
 
 def update_ewma(prev_ewma: float, delta_c: float, alpha: float) -> float:
@@ -111,80 +113,105 @@ class MonitoringService:
         sensor_id: str = "line-thermocouple",
         recorded_at: datetime | None = None,
     ) -> IngestionResult:
-        """Process one sensor reading and persist updated equipment and alert state."""
+        """Process one sensor reading atomically and persist updated equipment and alert state."""
         ts = _to_utc(recorded_at)
-        eq = self.store.get_equipment(bay_id)
-        delta_c = temperature_c - eq.baseline_temp_c
+        with self.store.transaction():
+            eq = self.store.get_equipment(bay_id)
+            delta_c = temperature_c - eq.baseline_temp_c
+            if eq.last_reading_at is not None and ts < eq.last_reading_at:
+                reading, unchanged_eq = self.store.record_late_reading(
+                    bay_id=bay_id,
+                    sensor_id=sensor_id,
+                    temperature_c=temperature_c,
+                    delta_c=delta_c,
+                    recorded_at=ts,
+                )
+                return IngestionResult(
+                    reading=reading,
+                    equipment=unchanged_eq,
+                    alert=None,
+                    alert_event=None,
+                    applied_to_detector=False,
+                    out_of_order=True,
+                )
 
-        new_ewma = update_ewma(eq.ewma_delta_c, delta_c, self.cfg.ewma_alpha)
-        new_cusum = update_cusum(eq.cusum_score, delta_c, self.cfg.cusum_drift_c)
-        new_post, new_mu = update_bayesian_hmm(
-            (eq.bayes_p_nom, eq.bayes_p_glitch, eq.bayes_p_fault),
-            eq.bayes_mu_fault,
-            delta_c,
-        )
-
-        status = eq.status
-        alert_active = eq.alert_active
-        alert_armed = eq.alert_armed
-        rearm_after = eq.rearm_after
-        open_alert: tuple[str, str, str, float] | None = None
-        resolve_alerts = False
-        alert_event: str | None = None
-
-        if status != "confirmed":
-            detector, metric, on_level, off_level, severity, msg = self._evaluate_detector(
-                delta_c=delta_c,
-                ewma=new_ewma,
-                cusum=new_cusum,
-                p_fault=new_post[2],
+            new_ewma = update_ewma(eq.ewma_delta_c, delta_c, self.cfg.ewma_alpha)
+            new_cusum = update_cusum(eq.cusum_score, delta_c, self.cfg.cusum_drift_c)
+            new_post, new_mu = update_bayesian_hmm(
+                (eq.bayes_p_nom, eq.bayes_p_glitch, eq.bayes_p_fault),
+                eq.bayes_mu_fault,
+                delta_c,
             )
-            if not alert_armed and (metric < off_level or (rearm_after is not None and ts >= rearm_after)):
-                alert_armed = True
-                rearm_after = None
 
-            if not alert_active and alert_armed and metric >= on_level:
-                alert_active = True
-                open_alert = (detector, severity, msg, round(metric, 4))
-                alert_event = "opened"
-            elif alert_active and metric < off_level:
-                alert_active = False
-                resolve_alerts = True
-                alert_event = "resolved"
-            status = "alert" if alert_active else "nominal"
+            status = eq.status
+            alert_active = eq.alert_active
+            alert_armed = eq.alert_armed
+            rearm_after = eq.rearm_after
+            open_alert: tuple[str, str, str, float] | None = None
+            resolve_alerts = False
+            alert_event: str | None = None
 
-        reading, updated_eq, alert_rec = self.store.record_reading_and_state(
-            bay_id=bay_id,
-            sensor_id=sensor_id,
-            temperature_c=temperature_c,
-            delta_c=delta_c,
-            recorded_at=ts,
-            status=status,
-            ewma_delta_c=new_ewma,
-            cusum_score=new_cusum,
-            bayes_post=new_post,
-            bayes_mu_fault=new_mu,
-            alert_active=alert_active,
-            alert_armed=alert_armed,
-            rearm_after=rearm_after,
-            open_alert=open_alert,
-            resolve_alerts=resolve_alerts,
-        )
-        return IngestionResult(reading=reading, equipment=updated_eq, alert=alert_rec, alert_event=alert_event)
+            if status != "confirmed":
+                detector, metric, on_level, off_level, severity, msg = self._evaluate_detector(
+                    delta_c=delta_c,
+                    ewma=new_ewma,
+                    cusum=new_cusum,
+                    p_fault=new_post[2],
+                )
+                if not alert_armed and (metric < off_level or (rearm_after is not None and ts >= rearm_after)):
+                    alert_armed = True
+                    rearm_after = None
+
+                if not alert_active and alert_armed and metric >= on_level:
+                    alert_active = True
+                    open_alert = (detector, severity, msg, round(metric, 4))
+                    alert_event = "opened"
+                elif alert_active and metric < off_level:
+                    alert_active = False
+                    resolve_alerts = True
+                    alert_event = "resolved"
+                status = "alert" if alert_active else "nominal"
+
+            reading, updated_eq, alert_rec = self.store.record_reading_and_state(
+                bay_id=bay_id,
+                sensor_id=sensor_id,
+                temperature_c=temperature_c,
+                delta_c=delta_c,
+                recorded_at=ts,
+                status=status,
+                ewma_delta_c=new_ewma,
+                cusum_score=new_cusum,
+                bayes_post=new_post,
+                bayes_mu_fault=new_mu,
+                alert_active=alert_active,
+                alert_armed=alert_armed,
+                rearm_after=rearm_after,
+                open_alert=open_alert,
+                resolve_alerts=resolve_alerts,
+            )
+            return IngestionResult(
+                reading=reading,
+                equipment=updated_eq,
+                alert=alert_rec,
+                alert_event=alert_event,
+                applied_to_detector=True,
+                out_of_order=False,
+            )
 
     def ingest_batch(self, readings: Sequence[ReadingInput]) -> list[IngestionResult]:
-        """Validate all bay IDs up front, then ingest readings in sequence."""
-        for bay_id in dict.fromkeys(item.bay_id for item in readings):
-            self.store.get_equipment(bay_id)
-        return [
-            self.ingest_reading(
-                item.bay_id,
-                item.temperature_c,
-                sensor_id=item.sensor_id,
-                recorded_at=item.recorded_at,
-            )
-            for item in readings
-        ]
+        """Validate all bay IDs up front, then ingest readings atomically in sequence."""
+        with self.store.transaction():
+            for bay_id in dict.fromkeys(item.bay_id for item in readings):
+                self.store.get_equipment(bay_id)
+            return [
+                self.ingest_reading(
+                    item.bay_id,
+                    item.temperature_c,
+                    sensor_id=item.sensor_id,
+                    recorded_at=item.recorded_at,
+                )
+                for item in readings
+            ]
 
     def _evaluate_detector(
         self,

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
+from thermal_sentinel import monitoring as monitoring_module
 from thermal_sentinel.monitoring import (
     MonitoringService,
     ReadingInput,
@@ -157,3 +162,61 @@ def test_ingest_batch_validates_all_bays_before_writing() -> None:
         )
         assert len(results) == 2
         assert len(store.list_readings()) == 2
+
+
+def test_concurrent_readings_serialize_read_compute_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    real_cusum = monitoring_module.update_cusum
+    counter_lock = threading.Lock()
+    in_flight = 0
+    max_in_flight = 0
+
+    def tracked_cusum(prev_cusum: float, delta_c: float, drift_c: float) -> float:
+        nonlocal in_flight, max_in_flight
+        with counter_lock:
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+        time.sleep(0.002)
+        try:
+            return real_cusum(prev_cusum, delta_c, drift_c)
+        finally:
+            with counter_lock:
+                in_flight -= 1
+
+    monkeypatch.setattr(monitoring_module, "update_cusum", tracked_cusum)
+
+    with MonitoringStore(tmp_path / "concurrent.db") as store:
+        service = MonitoringService(store, policy=Policy.CUSUM)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(service.ingest_reading, "B1", 30.0, recorded_at=t0) for _ in range(32)]
+            results = [future.result() for future in futures]
+
+        assert len(results) == 32
+        assert max_in_flight == 1
+        assert len(store.list_readings(bay_id="B1", limit=100)) == 32
+        # Every reading adds (2.0 - 0.6) = 1.4 with zero lost updates across threads
+        assert store.get_equipment("B1").cusum_score == pytest.approx(32 * 1.4)
+
+
+def test_out_of_order_readings_do_not_corrupt_detector_or_alert_state() -> None:
+    t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    with MonitoringStore(":memory:") as store:
+        service = MonitoringService(store, policy=Policy.ADAPTIVE)
+        for sec in (0, 2, 4, 10):
+            service.ingest_reading("B1", 33.0, recorded_at=t0 + timedelta(seconds=sec))
+
+        before_eq = store.get_equipment("B1")
+        before_alerts = store.list_alerts(bay_id="B1")
+        assert before_eq.status == "alert"
+        assert before_eq.alert_active is True
+
+        late = service.ingest_reading("B1", 28.0, sensor_id="delayed-probe", recorded_at=t0 + timedelta(seconds=3))
+        assert late.out_of_order is True
+        assert late.applied_to_detector is False
+        assert late.alert is None
+        assert late.alert_event is None
+        assert late.reading.out_of_order is True
+        assert late.equipment == before_eq
+        assert store.get_equipment("B1") == before_eq
+        assert store.list_alerts(bay_id="B1") == before_alerts
+        assert any(r.out_of_order and r.sensor_id == "delayed-probe" for r in store.list_readings(bay_id="B1"))

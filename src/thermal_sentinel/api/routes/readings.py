@@ -29,6 +29,8 @@ def _to_ingestion_response(result: IngestionResult) -> IngestionResponse:
         equipment=EquipmentResponse.model_validate(result.equipment),
         alert=None if result.alert is None else AlertResponse.model_validate(result.alert),
         alert_event=result.alert_event,
+        applied_to_detector=result.applied_to_detector,
+        out_of_order=result.out_of_order,
     )
 
 
@@ -63,10 +65,12 @@ def ingest_batch(
     results = service.ingest_batch(items)
     opened = sum(1 for item in results if item.alert_event == "opened")
     resolved = sum(1 for item in results if item.alert_event == "resolved")
+    out_of_order = sum(1 for item in results if item.out_of_order)
     return BatchIngestionResponse(
         ingested_count=len(results),
         alerts_opened=opened,
         alerts_resolved=resolved,
+        out_of_order_count=out_of_order,
         results=[_to_ingestion_response(item) for item in results],
     )
 

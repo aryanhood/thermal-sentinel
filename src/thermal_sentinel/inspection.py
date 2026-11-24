@@ -121,74 +121,79 @@ class InspectionPlanner:
         robot_y_m: float = 3.0,
         inspected_at: datetime | None = None,
     ) -> tuple[InspectionLogRecord, EquipmentRecord]:
-        """Submit a close-range thermal camera check and update alert/equipment state."""
+        """Submit a close-range thermal camera check and update alert/equipment state atomically."""
         ts = _to_utc(inspected_at)
-        eq = self.store.get_equipment(bay_id)
-        delta_c = camera_temp_c - eq.baseline_temp_c
+        with self.store.transaction():
+            eq = self.store.get_equipment(bay_id)
+            delta_c = camera_temp_c - eq.baseline_temp_c
 
-        if delta_c >= self.cfg.confirm_c:
-            outcome = "confirmed"
-            status = "confirmed"
-            alert_active = False
-            alert_armed = eq.alert_armed
-            rearm_after = None
-            cusum_score = 0.0
-            bayes_post = (eq.bayes_p_nom, eq.bayes_p_glitch, eq.bayes_p_fault)
-            bayes_mu = eq.bayes_mu_fault
-            resolution_status: str | None = "confirmed"
-            reason = f"Close camera reading {delta_c:+.1f} °C >= confirm {self.cfg.confirm_c:.1f} °C"
-        elif delta_c >= self.cfg.watch_c:
-            outcome = "watch"
-            status = eq.status
-            alert_active = eq.alert_active
-            alert_armed = eq.alert_armed
-            rearm_after = eq.rearm_after
-            cusum_score = eq.cusum_score
-            bayes_post = (eq.bayes_p_nom, eq.bayes_p_glitch, eq.bayes_p_fault)
-            bayes_mu = eq.bayes_mu_fault
-            resolution_status = None
-            reason = f"Inconclusive reading {delta_c:+.1f} °C (>= watch {self.cfg.watch_c:.1f} °C); continue watching"
-        elif eq.alert_active:
-            outcome = "false_alarm"
-            status = "nominal"
-            alert_active = False
-            alert_armed = False
-            rearm_after = ts + timedelta(seconds=self.cfg.rearm_after_s)
-            cusum_score = 0.0
-            bayes_post = (0.995, 0.004, 0.001)
-            bayes_mu = 1.2
-            resolution_status = "resolved"
-            reason = f"Close camera reading {delta_c:+.1f} °C < watch {self.cfg.watch_c:.1f} °C; false alarm cleared"
-        else:
-            outcome = "nominal"
-            status = "confirmed" if eq.status == "confirmed" else "nominal"
-            alert_active = False
-            alert_armed = eq.alert_armed
-            rearm_after = eq.rearm_after
-            cusum_score = eq.cusum_score
-            bayes_post = (eq.bayes_p_nom, eq.bayes_p_glitch, eq.bayes_p_fault)
-            bayes_mu = eq.bayes_mu_fault
-            resolution_status = None
-            reason = f"Routine check {delta_c:+.1f} °C, equipment nominal"
+            if delta_c >= self.cfg.confirm_c:
+                outcome = "confirmed"
+                status = "confirmed"
+                alert_active = False
+                alert_armed = eq.alert_armed
+                rearm_after = None
+                cusum_score = 0.0
+                bayes_post = (eq.bayes_p_nom, eq.bayes_p_glitch, eq.bayes_p_fault)
+                bayes_mu = eq.bayes_mu_fault
+                resolution_status: str | None = "confirmed"
+                reason = f"Close camera reading {delta_c:+.1f} °C >= confirm {self.cfg.confirm_c:.1f} °C"
+            elif delta_c >= self.cfg.watch_c:
+                outcome = "watch"
+                status = eq.status
+                alert_active = eq.alert_active
+                alert_armed = eq.alert_armed
+                rearm_after = eq.rearm_after
+                cusum_score = eq.cusum_score
+                bayes_post = (eq.bayes_p_nom, eq.bayes_p_glitch, eq.bayes_p_fault)
+                bayes_mu = eq.bayes_mu_fault
+                resolution_status = None
+                reason = (
+                    f"Inconclusive reading {delta_c:+.1f} °C (>= watch {self.cfg.watch_c:.1f} °C); continue watching"
+                )
+            elif eq.alert_active:
+                outcome = "false_alarm"
+                status = "nominal"
+                alert_active = False
+                alert_armed = False
+                rearm_after = ts + timedelta(seconds=self.cfg.rearm_after_s)
+                cusum_score = 0.0
+                bayes_post = (0.995, 0.004, 0.001)
+                bayes_mu = 1.2
+                resolution_status = "resolved"
+                reason = (
+                    f"Close camera reading {delta_c:+.1f} °C < watch {self.cfg.watch_c:.1f} °C; false alarm cleared"
+                )
+            else:
+                outcome = "nominal"
+                status = "confirmed" if eq.status == "confirmed" else "nominal"
+                alert_active = False
+                alert_armed = eq.alert_armed
+                rearm_after = eq.rearm_after
+                cusum_score = eq.cusum_score
+                bayes_post = (eq.bayes_p_nom, eq.bayes_p_glitch, eq.bayes_p_fault)
+                bayes_mu = eq.bayes_mu_fault
+                resolution_status = None
+                reason = f"Routine check {delta_c:+.1f} °C, equipment nominal"
 
-        return self.store.record_verification(
-            bay_id=bay_id,
-            policy=self.policy.value,
-            reason=reason,
-            robot_x_m=robot_x_m,
-            robot_y_m=robot_y_m,
-            camera_temp_c=camera_temp_c,
-            outcome=outcome,
-            inspected_at=ts,
-            status=status,
-            cusum_score=cusum_score,
-            bayes_post=bayes_post,
-            bayes_mu_fault=bayes_mu,
-            alert_active=alert_active,
-            alert_armed=alert_armed,
-            rearm_after=rearm_after,
-            alert_resolution_status=resolution_status,
-        )
+            return self.store.record_verification(
+                bay_id=bay_id,
+                policy=self.policy.value,
+                reason=reason,
+                robot_x_m=robot_x_m,
+                robot_y_m=robot_y_m,
+                camera_temp_c=camera_temp_c,
+                outcome=outcome,
+                inspected_at=ts,
+                status=status,
+                cusum_score=cusum_score,
+                bayes_post=bayes_post,
+                bayes_mu_fault=bayes_mu,
+                alert_active=alert_active,
+                alert_armed=alert_armed,
+                rearm_after=rearm_after,
+                alert_resolution_status=resolution_status,
+            )
 
     def replay_scenario(
         self,
@@ -197,19 +202,35 @@ class InspectionPlanner:
         seed: int = 3,
         fault_bay_id: str | None = "B5",
         max_ticks: int = 120,
-        reset_first: bool = True,
+        reset_first: bool = False,
     ) -> ReplaySummary:
-        """Stream a deterministic simulation scenario through the monitoring pipeline."""
+        """Stream a deterministic simulation scenario through the monitoring pipeline.
+
+        When ``reset_first`` is False (default), existing readings, alerts, and logs are
+        preserved and replayed ticks are appended after the latest recorded timestamp. When
+        ``reset_first`` is True, all stored readings, alerts, and inspection logs are
+        deleted and equipment baselines are reset to the simulated scenario's baselines.
+        """
         scenario = make_scenario(seed, fault_bay_id)
         env = Environment(scenario)
-        existing = {eq.bay_id for eq in self.store.list_equipment()}
+        existing = {eq.bay_id: eq for eq in self.store.list_equipment()}
         for bay in scenario.bays:
             if bay.id not in existing:
-                self.store.create_equipment(bay.id, bay.label, bay.x, bay.y, env.baseline_c[bay.id])
+                existing[bay.id] = self.store.create_equipment(bay.id, bay.label, bay.x, bay.y, env.baseline_c[bay.id])
         if reset_first:
             self.store.reset_monitoring_state(baseline_overrides=env.baseline_c)
+            baselines = env.baseline_c
+            start_ts = datetime(2026, 1, 1, tzinfo=UTC)
+        else:
+            baselines = {bay_id: eq.baseline_temp_c for bay_id, eq in existing.items()}
+            latest_ts = max(
+                (eq.last_reading_at for eq in existing.values() if eq.last_reading_at is not None),
+                default=None,
+            )
+            start_ts = (
+                datetime(2026, 1, 1, tzinfo=UTC) if latest_ts is None else latest_ts + timedelta(seconds=scenario.dt_s)
+            )
 
-        start_ts = datetime(2026, 1, 1, tzinfo=UTC)
         ticks_to_run = max(1, min(max_ticks, scenario.ticks))
         readings_ingested = 0
         alerts_opened = 0
@@ -217,7 +238,7 @@ class InspectionPlanner:
         for tick in range(ticks_to_run):
             ts = start_ts + timedelta(seconds=tick * scenario.dt_s)
             for bay_id in env.bay_ids:
-                temp_c = env.baseline_c[bay_id] + env.line_delta_c(bay_id, tick)
+                temp_c = baselines[bay_id] + env.line_delta_c(bay_id, tick)
                 res = service.ingest_reading(
                     bay_id,
                     temp_c,

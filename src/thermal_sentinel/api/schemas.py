@@ -63,7 +63,10 @@ class SimulationReplayRequest(BaseModel):
     seed: int = Field(default=3, ge=0, le=2**31 - 1)
     fault_bay_id: str | None = Field(default="B5", pattern=r"^[A-Za-z0-9_-]{1,32}$")
     max_ticks: int = Field(default=120, ge=1, le=360)
-    reset_first: bool = True
+    reset_first: bool = Field(
+        default=False,
+        description="When true, deletes all existing readings, alerts, and inspection logs before replaying.",
+    )
 
 
 class EquipmentResponse(BaseModel):
@@ -100,6 +103,7 @@ class SensorReadingResponse(BaseModel):
     delta_c: float
     recorded_at: datetime
     ingested_at: datetime
+    out_of_order: bool
 
 
 class AlertResponse(BaseModel):
@@ -121,12 +125,15 @@ class IngestionResponse(BaseModel):
     equipment: EquipmentResponse
     alert: AlertResponse | None
     alert_event: str | None
+    applied_to_detector: bool
+    out_of_order: bool
 
 
 class BatchIngestionResponse(BaseModel):
     ingested_count: int
     alerts_opened: int
     alerts_resolved: int
+    out_of_order_count: int
     results: list[IngestionResponse]
 
 

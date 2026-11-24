@@ -113,3 +113,41 @@ def test_update_baseline_and_reset_monitoring_state(tmp_path: Path) -> None:
 
         store.reset_monitoring_state()
         assert store.get_equipment("B2").baseline_temp_c == 29.0
+
+
+def test_update_baseline_resolves_open_and_acknowledged_alerts(tmp_path: Path) -> None:
+    t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    with MonitoringStore(tmp_path / "baseline_alerts.db") as store:
+        for bay_id in ("B1", "B2", "B3"):
+            store.record_reading_and_state(
+                bay_id=bay_id,
+                sensor_id="s-1",
+                temperature_c=34.0,
+                delta_c=6.0,
+                recorded_at=t0,
+                status="alert",
+                ewma_delta_c=3.0,
+                cusum_score=12.0,
+                bayes_post=(0.05, 0.05, 0.9),
+                bayes_mu_fault=4.0,
+                alert_active=True,
+                alert_armed=True,
+                rearm_after=None,
+                open_alert=("bayesian_hmm", "high", "Overheat", 0.9),
+            )
+        b2_alert = store.list_alerts(bay_id="B2", status="open")[0]
+        store.acknowledge_alert(b2_alert.id)
+
+        b1_eq = store.update_baseline("B1", 31.0)
+        b2_eq = store.update_baseline("B2", 31.5)
+
+        assert b1_eq.status == "nominal"
+        assert b1_eq.alert_active is False
+        assert b1_eq.last_reading_at == t0
+        assert b2_eq.status == "nominal"
+        assert b2_eq.alert_active is False
+        assert store.list_alerts(bay_id="B1", status="open") == []
+        assert store.list_alerts(bay_id="B2", status="acknowledged") == []
+        assert store.list_alerts(bay_id="B1", status="resolved")[0].resolved_at is not None
+        assert store.list_alerts(bay_id="B2", status="resolved")[0].resolved_at is not None
+        assert len(store.list_alerts(bay_id="B3", status="open")) == 1
