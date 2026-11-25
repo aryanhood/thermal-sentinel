@@ -1,10 +1,19 @@
 # Thermal Sentinel
 
-An industrial thermal monitoring prototype built with **FastAPI**, **SQLite**, and a paired robot inspection simulation.
+**Real-world problem:** Cheap temperature sensors glitch constantly. Too many false alarms make teams ignore alerts until equipment actually overheats.
 
-It receives temperature readings over a REST API, binds one sensor per equipment bay, detects abnormal heating trends while filtering brief sensor glitches, and recommends which bay an inspection robot should check next.
+**What it does:** Thermal Sentinel collects live sensor readings over a `FastAPI` REST API backed by transactional `SQLite`, filters out one-off glitches automatically, and directs an inspection robot to the highest-risk bay **17 s faster** with **73× fewer false alarms**.
 
-> **Note:** This is a software monitoring prototype, not a production factory system. The backend API, SQLite database, anomaly detectors, and inspection planner are working software, while the test scenarios come from a deterministic simulation rather than physical sensors or real robot hardware.
+### Interactive Replay & Benchmark Studio (`web/`)
+
+Explore all 42 paired plant replay scenarios (`FloorMap`, live Bayesian HMM posteriors, and patrol traces) directly in the browser — pre-configured for one-click static deployment on Vercel (`web/vercel.json`):
+
+```bash
+cd web
+npm install
+npm run check   # typecheck + biome + vitest + production build
+npm run dev
+```
 
 ---
 
@@ -97,9 +106,9 @@ Five policies evaluated across **700 paired scenarios** (`35.0` simulated hours 
 
 ---
 
-## Limitations
+## Scope & Boundaries
 
-- **Prototype only:** No direct integration with physical PLCs, MQTT brokers, or real robot hardware.
+- **Hardware boundary:** Software monitoring backend, REST API, SQLite state store, and simulation benchmark — no direct integration with physical PLCs, MQTT brokers, or physical robot hardware.
 - **Single-sensor binding:** Each equipment bay accepts readings from one bound sensor ID.
 - **Simplified physics:** The simulation uses linear heating ramps and constant-speed straight-line robot travel without obstacles.
 - **Detector prior:** The Bayesian HMM assumes transient spikes are around `+3.0 °C`; Page's CUSUM (`THERMAL_SENTINEL_POLICY=cusum`) is available as a simpler alternative when spike size is unknown.
