@@ -6,7 +6,7 @@
 
 ### Interactive Replay & Benchmark Studio (`web/`)
 
-Explore all 42 paired plant replay scenarios (`FloorMap`, live Bayesian HMM posteriors, and patrol traces) directly in the browser — pre-configured for one-click static deployment on Vercel (`web/vercel.json`):
+**[Open Live Replay Studio](https://thermal-sentinel-six.vercel.app)** — Explore all 42 paired plant replay scenarios (`FloorMap`, live Bayesian HMM posteriors, and patrol traces) directly in the browser, or run locally:
 
 ```bash
 cd web
